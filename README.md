@@ -90,6 +90,25 @@ Before any HTTP request, the CLI exits 1 on unreadable or invalid JSON, nonfinit
 
 Only the `questions` mapping is sent. `schema_version` describes the file format. It is never sent and is not part of a question set's identity. Wrapping a legacy file in version 1 changes nothing the API sees, and any change to question content changes every request. The `--cache` key uses the unwrapped mapping, never the file path or `schema_version`, so a version-1 file and its legacy equivalent share cache entries.
 
+## Summarize results
+
+Summarize saved batch output offline. It reads no credentials and makes no network calls:
+
+```sh
+python3 jev.py summarize --question failure_pattern --questions examples/failure-patterns.json < results.jsonl
+```
+
+Input is the JSONL that `classify` or `batch` wrote, from stdin or `--input results.jsonl`. The source file is only read. `--question` names the Choice answer to count. It is optional only when the input holds exactly one question name, or when `--questions` holds exactly one question. Results with several question names need one summary per name. `--questions` is optional here. When given, its `criteria` order seeds every label with a zero count. Labels not in the criteria follow in first-seen order.
+
+The output is one JSON object:
+
+- `records` is the denominator: every input line. Each line counts once in `counts`, and once in either a confidence bin, `missing`, `malformed`, or `out_of_range`.
+- `counts` maps each label to its record count. `examples` lists the first three IDs per label in input order, unchanged.
+- `confidence.bins` holds ten fixed bins, `0.0-0.1` through `0.9-1.0`. Each includes its lower edge and excludes its upper edge, except `0.9-1.0`, which includes 1. A confidence of 0 lands in `0.0-0.1`. These are the same edges as `eval`'s calibration buckets.
+- `missing` counts answers with no `confidence`. A non-numeric or boolean value counts as `malformed`. A number below 0 or above 1 counts as `out_of_range`. Each malformed or out-of-range value gets a line-numbered entry in `diagnostics`, also printed to stderr, and the exit stays 0.
+
+Summarize sends no requests, so `--cache`, `--dry-run`, and `--labels` exit 1 instead of being ignored. Empty input with a selected question prints `records: 0`, zero counts for any seeded labels, and zero bins. Invalid JSON, a line without `id` and an `answers` object, or a selected answer that is not a Choice stops with exit 1 and the line number, printing no summary. The summary never rewrites results, so full probability maps stay in the saved JSONL. Score, Noul, and Box answers are not summarized: Score levels and Noul probabilities have no label to count, and Box answers hold coordinates. Read those from the saved results with your own code.
+
 ## Question contracts
 
 Question objects in the mapping pass through to the API, which validates their detailed schema:
@@ -144,7 +163,7 @@ python3 scripts/demo_sessions.py --send
 
 `--send` reuses the exact existing `.private/demo/sample.jsonl` without resampling or rewriting it, and pipes it to `jev.py batch` as UTF-8 whatever the locale. It caches successful responses in `.private/demo/cache`, so a rerun sends only missing records. Cache keys cover the redacted outgoing request, so a change to the redaction policy or `--no-redact` misses earlier entries. Missing samples fail before transmission. `--limit` must be between 1 and 20; an existing sample larger than the limit is rejected without truncation. Running without `--send` prepares and replaces the sample.
 
-The script retains trailing user and assistant messages up to 24,000 characters, caps each message at 4,000 characters, and omits tools and reasoning. It writes the redacted inputs, API results, and the counts and example IDs by category beneath ignored `.private/demo/`. Do not commit those files.
+The script retains trailing user and assistant messages up to 24,000 characters, caps each message at 4,000 characters, and omits tools and reasoning. It writes the redacted inputs, API results, and the `jev.py summarize` counts, example IDs, and confidence bins by category beneath ignored `.private/demo/`. Do not commit those files.
 
 ### Redaction
 
@@ -174,7 +193,7 @@ python3 jev.py --help
 git diff --check
 ```
 
-Tests mock HTTP at the CLI boundary, checking request shape/auth, complete responses, failures, partial batch output, and credential selection. Eval tests check the example fixture's exact metrics through a fresh process, edge cases, and that eval sends nothing and reads no credentials. No live API credential is required for tests.
+Tests mock HTTP at the CLI boundary, checking request shape/auth, complete responses, failures, partial batch output, and credential selection. Eval tests check the example fixture's exact metrics through a fresh process, edge cases, and that eval sends nothing and reads no credentials. No live API credential is required for tests. Summarize tests run the CLI on synthetic result files.
 
 Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI and the session demo against a loopback System One stub, with an opt-in `--live` journey of three synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, batch invariants, question-file versioning, and demo redaction over bounded inputs, and proves each check can fail on a broken `jev.py` or demo script:
 

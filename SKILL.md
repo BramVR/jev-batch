@@ -7,7 +7,7 @@ description: "Classify many records with Jev."
 
 Use the repository's stdlib `jev.py` for judgment over records. Read [README.md](README.md) for CLI contracts and supported question types.
 
-For classify-many work, script the loop. Extract records to JSONL `{id,state}`, write one version-1 question document (`{"schema_version": 1, "questions": {...}}`), then pipe records through `python3 jev.py batch --questions questions.json`. Keep related questions in the same mapping. Each record is one request. Preserve IDs and full responses; aggregate counts with code after saving results. Do not replace probability maps with just winning labels.
+For classify-many work, script the loop. Extract records to JSONL `{id,state}`, write one version-1 question document (`{"schema_version": 1, "questions": {...}}`), then pipe records through `python3 jev.py batch --questions questions.json`. Keep related questions in the same mapping. Each record is one request. Preserve IDs and full responses. After saving results, count Choice labels, example IDs, and confidence bins with `python3 jev.py summarize --question NAME < results.jsonl`; aggregate Score, Noul, and Box with your own code. Do not replace probability maps with just winning labels.
 
 Use Choice for categories, Score for ordered levels, and Noul for yes/no probabilities. Verify unfamiliar fields against the linked TypeSafe docs before writing questions. Free OpenCode Jev 1.13 supports text only. Box and assets require a supporting backend and model, such as TypeSafe Jev 1.14.
 
