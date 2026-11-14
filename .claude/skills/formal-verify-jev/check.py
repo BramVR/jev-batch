@@ -4,6 +4,7 @@
 import argparse
 from collections import Counter
 import contextlib
+from fractions import Fraction
 from dataclasses import dataclass, field
 from decimal import Decimal
 import http.client
@@ -31,7 +32,7 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "5580bfa2f1660955209f6bf32e42f9c21280a3e9",
+    "jev.py": "bd7704ccc5738174ff653738e9aae0a2270857fb",
     "scripts/demo_sessions.py": "aefdd89b19f0dc1fb55430cdf2227387b93c7bab",
 }
 KEY = "sentinel-key-not-real"
@@ -1410,6 +1411,253 @@ def check_question_file_dry_run(c, case, command, document, real):
             c.fail("dry-run-questions-like-send", case, f"row {row} vs sent body of {len(real.requests[0]['request'].data)} bytes")
 
 
+# P9. --chunk-tokens: bounded, covering, greedy splits; exact mean aggregation; fail-closed chunks and guards.
+
+CHUNK_ALPHABET = ["a", "\u00e9", "\u20ac", "\U0001F600"]  # 1, 2, 3, 4 UTF-8 bytes
+CHUNK_CAPACITIES = [4, 5, 6, 7, 9]
+# Per chunk count. The 3-chunk grid holds 0.5 +/- 1 ulp, where float-rounded sums flip the winner.
+GRID = {2: [0, 0.25, 0.5, 0.75, 1], 3: [0, 0.4999999999999999, 0.5, 0.5000000000000001]}
+CHOICE_AB = {"c": {"type": "choice", "criteria": {"a": "A", "b": "B"}}}
+CHOICE_BA = {"c": {"type": "choice", "criteria": {"b": "B", "a": "A"}}}
+
+
+def budget_for(c, questions, capacity):
+    return str(c.jev.REQUEST_OVERHEAD_TOKENS + len(json.dumps(questions, ensure_ascii=False).encode()) + capacity)
+
+
+def choice_body(a, b):
+    return {"model": "m", "answers": {"c": {"type": "choice", "choice": "a", "confidence": max(a, b),
+                                            "probabilities": {"a": a, "b": b}}}, "usage": {"n": 1}}
+
+
+def check_chunk_split(c, max_len):
+    questions = c.questions_file(CHOICE_AB)
+    reply = json.dumps(choice_body(0.5, 0.5)).encode()
+    for capacity, n in itertools.product(CHUNK_CAPACITIES, range(max_len + 1)):
+        budget = budget_for(c, CHOICE_AB, capacity)
+        for chars in itertools.product(CHUNK_ALPHABET, repeat=n):
+            c.cases += 1
+            state = "".join(chars)
+            record = json.dumps({"id": ["k", n], "state": state})
+            case = f"chunk-split capacity={capacity} state={state!r}"
+            argv = ["classify", "--questions", questions, "--model", "m", "--retries", "0"]
+            run = drive(c.jev, argv + ["--chunk-tokens", budget], record, respond=lambda i, r: reply)
+            if not c.clean_exit("chunk-clean-exit", case, run):
+                continue
+            sent = [json.loads(r["request"].data) for r in run.requests]
+            pieces = [b.get("state") for b in sent]
+            # The state content is proven by chunk-cover; here only its type and the other keys.
+            if run.code != 0 or not all(isinstance(p, str) and same(b, {"model": "m", "state": p, "questions": CHOICE_AB})
+                                        for b, p in zip(sent, pieces)):
+                c.fail("chunk-request-body", case, f"exit {run.code} bodies {sent}")
+                continue
+            if any(len(p.encode()) > capacity for p in pieces):
+                c.fail("chunk-bounded", case, f"pieces {pieces}")
+            if "".join(pieces) != state or (state and "" in pieces):
+                c.fail("chunk-cover", case, f"pieces {pieces}")
+            if any(len((p + q[:1]).encode()) <= capacity for p, q in zip(pieces, pieces[1:])):
+                c.fail("chunk-greedy", case, f"pieces {pieces}")
+            out = json.loads(run.stdout)
+            if len(state.encode()) <= capacity:
+                plain = drive(c.jev, argv, record, respond=lambda i, r: reply)
+                if run.stdout != plain.stdout or len(run.requests) != 1:
+                    c.fail("chunk-small-unchanged", case, f"stdout {run.stdout!r} vs {plain.stdout!r}")
+                continue
+            spans = [(ch["start"], ch["end"]) for ch in out.get("chunks", [])]
+            ends = [0] + [e for _, e in spans]
+            if (not same(out["id"], ["k", n]) or out.get("chunking", {}).get("count") != len(pieces)
+                    or [state[s:e] for s, e in spans] != pieces or [s for s, _ in spans] != ends[:-1]):
+                c.fail("chunk-metadata", case, f"stdout {run.stdout[:200]!r}")
+
+
+def check_chunk_aggregate(c):
+    state = "abcdefghij"
+    for questions, nchunks in itertools.product((CHOICE_AB, CHOICE_BA), (2, 3)):
+        path = c.questions_file(questions)
+        capacity = -(-len(state) // nchunks)
+        budget = budget_for(c, questions, capacity)
+        labels = list(questions["c"]["criteria"])
+        for grid in itertools.product(itertools.product(GRID[nchunks], repeat=2), repeat=nchunks):
+            c.cases += 1
+            replies = [choice_body(a, b) for a, b in grid]
+            case = f"chunk-aggregate order={labels} chunks={grid}"
+            run = drive(c.jev, ["classify", "--questions", path, "--chunk-tokens", budget, "--retries", "0"],
+                        json.dumps({"id": "g", "state": state}), respond=lambda i, r: json.dumps(replies[i]).encode())
+            if not c.clean_exit("chunk-clean-exit", case, run):
+                continue
+            if run.code != 0 or len(run.requests) != nchunks:
+                c.fail("chunk-one-post-per-chunk", case, f"exit {run.code}, {len(run.requests)} requests")
+                continue
+            out = json.loads(run.stdout)
+            mean = {label: sum(Fraction(r["answers"]["c"]["probabilities"][label]) for r in replies) / nchunks
+                    for label in labels}
+            winner = next(label for label in labels if mean[label] == max(mean.values()))
+            answer = out["answers"]["c"]
+            if list(answer["probabilities"]) != labels or not all(
+                    same(answer["probabilities"][label], float(mean[label])) for label in labels):
+                c.fail("chunk-mean-exact", case, f"probabilities {answer['probabilities']}")
+            if answer["choice"] != winner:
+                c.fail("chunk-argmax-tiebreak", case, f"choice {answer['choice']!r}, expected {winner!r}")
+            if not same(answer["confidence"], float(mean[winner])):
+                c.fail("chunk-confidence", case, f"confidence {answer['confidence']!r}")
+            if not all(same(ch["response"], r) for ch, r in zip(out["chunks"], replies)):
+                c.fail("chunk-responses-verbatim", case, "chunk response altered")
+
+
+CHUNK_FAILURES = {
+    "http_500": http_status(500),
+    "http_400": http_status(400),
+    "timeout": raiser(TimeoutError()),
+    "label_missing": body(json.dumps({"answers": {"c": {"probabilities": {"a": 1}}}})),
+    "label_extra": body(json.dumps({"answers": {"c": {"probabilities": {"a": 0.5, "b": 0.5, "z": 0}}}})),
+    "bool_probability": body(json.dumps({"answers": {"c": {"probabilities": {"a": True, "b": 0}}}})),
+    "answer_missing": body('{"answers":{}}'),
+    "resp_infinity": body('{"answers":{"c":{"probabilities":{"a":1e999,"b":0}}}}'),
+    "resp_not_json": body(SECRET_BODY),
+}
+TRANSIENT_CHUNK_FAILURES = ("http_500", "timeout")
+FAILING_RECORD = "abcdefghijkl"
+FAILING_CHUNKS = ["abcd", "efgh", "ijkl"]
+
+
+def by_state(fail_on, responder, times=None):
+    """Respond by the chunk text a request carries, so worker-thread order cannot shift which chunk fails."""
+    good = json.dumps(choice_body(0.5, 0.5)).encode()
+    seen = []
+
+    def respond(i, request):
+        state = json.loads(request.data)["state"]
+        if state == fail_on and (times is None or seen.count(state) < times):
+            seen.append(state)
+            return responder(i, request)
+        return good
+    return respond
+
+
+def check_chunk_failures(c):
+    path = c.questions_file(CHOICE_AB)
+    budget = budget_for(c, CHOICE_AB, 4)
+    lines = '{"id":"s","state":"ab"}\n{"id":"f","state":"%s"}\n{"id":"t","state":"cd"}\n' % FAILING_RECORD
+    for (kind, responder), at, (command, concurrency) in itertools.product(
+            CHUNK_FAILURES.items(), range(3), (("classify", 1), ("batch", 1), ("batch", 2))):
+        c.cases += 1
+        case = f"chunk-failure {command} concurrency={concurrency} {kind} at chunk {at + 1}/3"
+        stdin = lines if command == "batch" else lines.splitlines()[1]
+        argv = [command, "--questions", path, "--chunk-tokens", budget, "--retries", "0"]
+        argv += ["--concurrency", str(concurrency)] if command == "batch" else []
+        run = drive(c.jev, argv, stdin, respond=by_state(FAILING_CHUNKS[at], responder))
+        if not c.clean_exit("chunk-clean-exit", case, run):
+            continue
+        prefix = "jev: batch stopped at line 2; " if command == "batch" else "jev: "
+        expected_out = [{"id": "s", **choice_body(0.5, 0.5)}] if command == "batch" else []
+        got = [json.loads(x) for x in run.stdout.splitlines()]
+        sent = [json.loads(r["request"].data)["state"] for r in run.requests]
+        if (run.code != 1 or len(got) != len(expected_out) or not all(map(same, got, expected_out))
+                or [x for x in sent if x in FAILING_CHUNKS] != FAILING_CHUNKS[:at + 1]
+                or not run.stderr.startswith(prefix + f"chunk {at + 1}/3: ")):
+            c.fail("chunk-failure-closed", case, f"exit {run.code} stdout {run.stdout[:80]!r} sent {sent} stderr {run.stderr!r}")
+        if SECRET_BODY in run.stdout + run.stderr:
+            c.fail("chunk-no-body-leak", case, "response body echoed")
+        if kind in TRANSIENT_CHUNK_FAILURES and command == "classify":
+            retried = drive(c.jev, argv[:-2] + ["--retries", "1"], stdin,
+                            respond=by_state(FAILING_CHUNKS[at], responder, times=1))
+            sent = [json.loads(r["request"].data)["state"] for r in retried.requests]
+            want = FAILING_CHUNKS[:at + 1] + FAILING_CHUNKS[at:]
+            if retried.code != 0 or sent != want:
+                c.fail("chunk-retry-resends-only-that-chunk", case, f"exit {retried.code} sent {sent}")
+
+
+def check_chunk_cache(c):
+    path = c.questions_file(CHOICE_AB)
+    budget = budget_for(c, CHOICE_AB, 4)
+    good = json.dumps(choice_body(0.5, 0.5)).encode()
+    record = '{"id":"r","state":"%s"}' % FAILING_RECORD
+    for (kind, responder), at in itertools.product(CHUNK_FAILURES.items(), range(3)):
+        c.cases += 1
+        case = f"chunk-cache {kind} at chunk {at + 1}/3"
+        argv = ["classify", "--questions", path, "--chunk-tokens", budget, "--retries", "0", "--cache", tempfile.mkdtemp(dir=c.tmp)]
+        first = drive(c.jev, argv, record, respond=by_state(FAILING_CHUNKS[at], responder))
+        resumed = drive(c.jev, argv, record, respond=lambda i, r: good)
+        again = drive(c.jev, argv, record, respond=lambda i, r: good)
+        if not all(c.clean_exit("chunk-clean-exit", case, run) for run in (first, resumed, again)):
+            continue
+        sent = [json.loads(r["request"].data)["state"] for r in resumed.requests]
+        if resumed.code != 0 or sent != FAILING_CHUNKS[at:]:
+            c.fail("chunk-cache-resume", case, f"rerun exit {resumed.code} sent {sent} stderr {resumed.stderr!r}")
+        if again.code != 0 or again.requests or again.stdout != resumed.stdout:
+            c.fail("chunk-cache-reuse", case, f"third run exit {again.code}, {len(again.requests)} requests")
+
+
+def check_chunk_dry_run(c):
+    path = c.questions_file(CHOICE_AB)
+    backend = c.jev.Backend("http://127.0.0.1:8080/v1", "m")
+    for capacity, n in itertools.product((4, 7), range(0, 13, 3)):
+        c.cases += 1
+        state = ("ab\u00e9\U0001F600" * 4)[:n]
+        case = f"chunk-dry-run capacity={capacity} state={state!r}"
+        budget = budget_for(c, CHOICE_AB, capacity)
+        run = drive(c.jev, ["batch", "--dry-run", "--questions", path, "--chunk-tokens", budget, "--base-url",
+                            "http://127.0.0.1:8080/v1", "--model", "m"], json.dumps({"id": "d", "state": state}) + "\n",
+                    env={"TYPESAFE_API_KEY": KEY}, respond=lambda i, r: b"{}")
+        if not c.clean_exit("chunk-clean-exit", case, run):
+            continue
+        sent = drive(c.jev, ["classify", "--questions", path, "--chunk-tokens", budget, "--retries", "0", "--base-url",
+                             "http://127.0.0.1:8080/v1", "--model", "m"], json.dumps({"id": "d", "state": state}),
+                     respond=lambda i, r: json.dumps(choice_body(0.5, 0.5)).encode())
+        row = json.loads(run.stdout)["records"][0] if run.code == 0 else {}
+        bodies = [len(r["request"].data) for r in sent.requests]
+        chunked = len(bodies) > 1
+        if (run.code != 0 or run.requests or run.key_reads or row.get("request_bytes") != sum(bodies)
+                or row.get("chunks") != (len(bodies) if chunked else None)):
+            c.fail("chunk-dry-run", case, f"exit {run.code} row {row} sent bodies {bodies}")
+
+
+CHUNK_GUARDS = [
+    ({"c": {"type": "score", "criteria": ["lo", "hi"]}}, '{"id":1,"state":"x"}', "30000"),
+    ({"c": NOUL}, '{"id":1,"state":"x"}', "30000"),
+    ({"c": {"type": "choice", "criteria": ["a", "b"]}}, '{"id":1,"state":"x"}', "30000"),
+    ({"c": {"type": "choice", "criteria": {}}}, '{"id":1,"state":"x"}', "30000"),
+    ({"c": {"type": "choice"}}, '{"id":1,"state":"x"}', "30000"),
+    ({**CHOICE_AB, "n": NOUL}, '{"id":1,"state":"x"}', "30000"),
+    (CHOICE_AB, '{"id":1,"state":{"t":"x"}}', "30000"),
+    (CHOICE_AB, '{"id":1,"state":["x"]}', "30000"),
+    (CHOICE_AB, json.dumps({"id": 1, "state": "x", "assets": ASSETS}), "30000"),
+    (CHOICE_AB, '{"id":1,"state":"x"}', "0"),
+    (CHOICE_AB, '{"id":1,"state":"x"}', "-5"),
+    (CHOICE_AB, '{"id":1,"state":"x"}', "32001"),
+    (CHOICE_AB, '{"id":1,"state":"x"}', "530"),
+    (CHOICE_AB, '{"id":1,"state":"x"}', "1.5"),
+]
+
+
+def check_chunk_guards(c):
+    reply = json.dumps(choice_body(0.5, 0.5)).encode()
+    for (questions, record, budget), command in itertools.product(CHUNK_GUARDS, ("classify", "batch")):
+        c.cases += 1
+        case = f"chunk-guard {command} questions={questions} record={record} budget={budget}"
+        run = drive(c.jev, [command, "--questions", c.questions_file(questions), "--chunk-tokens", budget],
+                    record + "\n", respond=lambda i, r: reply)
+        if not c.clean_exit("chunk-clean-exit", case, run):
+            continue
+        if run.code not in (1, 2) or run.stdout or run.requests:
+            c.fail("chunk-guards", case, f"exit {run.code} stdout {run.stdout!r} {len(run.requests)} requests")
+    for argv in (["summarize", "--chunk-tokens", "30000"],
+                 ["eval", "--questions", c.questions_file(CHOICE_AB), "--labels", c.questions_file(CHOICE_AB), "--chunk-tokens", "30000"]):
+        c.cases += 1
+        run = drive(c.jev, argv, "", respond=lambda i, r: reply)
+        if run.code != 1 or run.requests or "--chunk-tokens is for classify and batch" not in run.stderr:
+            c.fail("chunk-guards", f"chunk-guard offline {argv[0]}", f"exit {run.code} stderr {run.stderr!r}")
+
+
+def check_chunk(c, depth):
+    check_chunk_split(c, depth + 1)
+    check_chunk_aggregate(c)
+    check_chunk_failures(c)
+    check_chunk_cache(c)
+    check_chunk_dry_run(c)
+    check_chunk_guards(c)
+
+
 # Broken variants of jev.py. Each must make the named property fail, or the check proves nothing.
 
 MUTANTS = [
@@ -1477,8 +1725,8 @@ MUTANTS = [
      [("    result = cache.load(entry) if entry else None\n",
        '    result = cache.load(entry) if entry else None\n    result = result and {**result, "id": "cached"}\n')]),
     ("failure stored and trusted", "cache-never-stores-failure",
-     [("        result = post(request, timeout, retries, stop)\n",
-       "        result = post(request, timeout, retries, stop)\n        cache and cache.store(entry, result)\n"),
+     [("    result = post(request, timeout, retries, stop)\n",
+       "    result = post(request, timeout, retries, stop)\n    cache and cache.store(entry, result)\n"),
       ('return entry["response"] if valid_response(entry.get("response")) else None', 'return entry.get("response")')]),
     ("corrupt entry raises", "cache-corrupt-refetch",
      [("        except (OSError, ValueError, UnicodeError, RecursionError):\n            return None",
@@ -1488,7 +1736,7 @@ MUTANTS = [
     ("cache keyed per questions file", "cache-hit-across-question-file-forms",
      [("cache = Cache(args.cache) if args.cache else None", "cache = Cache(args.cache / args.questions.name) if args.cache else None")]),
     ("successful responses never stored", "cache-stores-after-retry",
-     [("        if cache:\n            cache.store(entry, result)\n", "")]),
+     [("    if cache:\n        cache.store(entry, result)\n", "")]),
     ("cache never read", "cache-resume-sends-only-missing",
      [("result = cache.load(entry) if entry else None", "result = None")]),
     ("eval reads credentials", "eval-offline",
@@ -1519,9 +1767,9 @@ MUTANTS = [
     ("dry run reads credentials", "dry-run-no-network-no-credentials",
      [("api_key() if backend.typesafe and not args.dry_run else None", "api_key() if backend.typesafe else None")]),
     ("dry run also sends", "dry-run-no-network-no-credentials",
-     [('                emit(dry_run_report([estimate(read_json(raw), questions, backend)], backend))',
+     [('                emit(dry_run_report([estimator(read_json(raw))], backend))',
        "                emit(dry_run_report([[classify(read_json(raw), questions, key, backend, args.timeout), "
-       "estimate(read_json(raw), questions, backend)][1]], backend))")]),
+       "estimator(read_json(raw))][1]], backend))")]),
     ("dry run skips record validation", "dry-run-validates-like-send",
      [("    payload = request_payload(record, questions, backend)\n    text = ",
        "    payload = dict(record, questions=questions)\n    text = ")]),
@@ -1536,9 +1784,9 @@ MUTANTS = [
      [('"question_tokens_estimate": estimate_tokens(questions)',
        '"question_tokens_estimate": estimate_tokens({"schema_version": 1, "questions": questions})')]),
     ("dry run writes the cache", "dry-run-ignores-cache",
-     [('                emit(dry_run_report([estimate(read_json(raw), questions, backend)], backend))',
+     [('                emit(dry_run_report([estimator(read_json(raw))], backend))',
        "                cache and cache.store(cache.path(backend.endpoint, request_body(request_payload(read_json(raw), questions, backend))), {\"answers\": {}})\n"
-       + '                emit(dry_run_report([estimate(read_json(raw), questions, backend)], backend))')]),
+       + '                emit(dry_run_report([estimator(read_json(raw))], backend))')]),
     ("eval accepts --dry-run and ignores it", "eval-errors",
      [('        if offline and args.dry_run:\n', '        if False:\n')]),
     ("dry run total drops a batch row", "dry-run-total-is-sum",
@@ -1562,6 +1810,45 @@ MUTANTS = [
      [("if offline and (args.retries is not None or args.concurrency is not None):", "if False:")]),
     ("summarize reads credentials", "summarize-offline",
      [("            return run_summarize(args)", "            api_key()\n            return run_summarize(args)")]),
+    ("chunk split counts characters, not bytes", "chunk-bounded",
+     [('        width = len(char.encode("utf-8"))', '        width = 1')]),
+    ("chunks overlap by one character", "chunk-cover",
+     [("            start, size = end, 0", "            start, size = end - 1, 0")]),
+    ("chunk split leaves room unused", "chunk-greedy",
+     [("        if size + width > capacity:", "        if size + width >= capacity:")]),
+    ("small input wrapped in chunk output", "chunk-small-unchanged",
+     [("    if len(spans) == 1:\n        return respond(", "    if False:\n        return respond(")]),
+    ("aggregate sums instead of averaging", "chunk-mean-exact",
+     [(" for p in chunk_probabilities))) / len(chunk_probabilities)", " for p in chunk_probabilities)))")]),
+    ("aggregate rounds sums before dividing", "chunk-argmax-tiebreak",
+     [("    choice = max(labels, key=exact.__getitem__)", "    choice = max(labels, key=lambda k: math.fsum(\n"
+       "        p[k] for p in chunk_probabilities) / len(chunk_probabilities))")]),
+    ("tie goes to the last criteria label", "chunk-argmax-tiebreak",
+     [("    choice = max(labels, key=exact.__getitem__)", "    choice = max(labels[::-1], key=exact.__getitem__)")]),
+    ("confidence taken from the first label", "chunk-confidence",
+     [('"confidence": total[choice]', '"confidence": total[labels[0]]')]),
+    ("chunk offsets shifted", "chunk-metadata",
+     [('chunks.append({"index": index, "start": start,', 'chunks.append({"index": index, "start": start + 1,')]),
+    ("chunk usage dropped from audit copy", "chunk-responses-verbatim",
+     [('        del result["id"]\n', '        del result["id"]\n        result.pop("usage", None)\n')]),
+    ("failed chunk skipped", "chunk-failure-closed",
+     [('            raise JevError(f"chunk {index + 1}/{len(spans)}: {detail}") from None', "            continue")]),
+    ("chunk label check dropped", "chunk-failure-closed",
+     [('set(probabilities) != set(question["criteria"]) or not all(', "not all(")]),
+    ("chunked path ignores the cache", "chunk-cache-reuse",
+     [("respond(None, request, timeout, retries, stop, cache,", "respond(None, request, timeout, retries, stop, None,")]),
+    ("caller check runs after caching", "chunk-cache-resume",
+     [("    if check:\n        # A caller-level rejection must never be cached, or every rerun replays it without asking again.\n"
+       "        check(result)\n    if cache:\n        cache.store(entry, result)\n",
+       "    if cache:\n        cache.store(entry, result)\n    if check:\n        check(result)\n")]),
+    ("chunk requests skip retries", "chunk-retry-resends-only-that-chunk",
+     [("respond(None, request, timeout, retries, stop, cache,", "respond(None, request, timeout, 0, stop, cache,")]),
+    ("dry run prices only the first chunk", "chunk-dry-run",
+     [("for start, end in spans]", "for start, end in spans[:1]]")]),
+    ("non-choice questions accepted for chunking", "chunk-guards",
+     [('    if any(q["type"] != "choice" or', '    if False and any(q["type"] != "choice" or')]),
+    ("offline commands accept --chunk-tokens", "chunk-guards",
+     [("        if offline and args.chunk_tokens is not None:\n", "        if False:\n")]),
 ]
 
 # Broken variants of scripts/demo_sessions.py, checked the same way.
@@ -1620,14 +1907,16 @@ def run_all(jev, demo, depth, only=None):
                          ("redaction", lambda: (check_redaction(c), check_redact_before_cap(c), check_demo_send(c))),
                          ("cache", lambda: check_cache(c, min(depth, 2))),
                          ("eval", lambda: check_eval(c)),
-                         ("summarize", lambda: check_summarize(c, min(depth, 2)))):
+                         ("summarize", lambda: check_summarize(c, min(depth, 2))),
+                         ("chunk", lambda: check_chunk(c, depth))):
             if only in (None, name):
                 fn()
         return c
 
 
 SECTIONS = {"batch": "batch", "numbers": "numbers", "questions": "questions", "cache": "cache", "eval": "eval",
-            "summarize": "summarize", "redact": "redaction", "demo": "redaction", "retry": "retry"}
+            "summarize": "summarize", "redact": "redaction", "demo": "redaction", "retry": "retry",
+            "chunk": "chunk"}
 
 
 # Properties checked outside the section their prefix names; a mutant must run where its property is checked.
@@ -1673,7 +1962,7 @@ def stale():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--depth", type=int, default=3, help="max batch length to enumerate (default 3)")
-    parser.add_argument("--only", choices=["batch", "schedules", "retry", "requests", "numbers", "questions", "redaction", "cache", "eval", "summarize"])
+    parser.add_argument("--only", choices=["batch", "schedules", "retry", "requests", "numbers", "questions", "redaction", "cache", "eval", "summarize", "chunk"])
     parser.add_argument("--mutants", action="store_true", help="also prove each property fails on a broken jev.py")
     parser.add_argument("--stale", action="store_true", help="only report covered files whose content differs from SYNC_BLOBS")
     args = parser.parse_args()
