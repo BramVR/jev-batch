@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 DEFAULT_BASE_URL = "https://opencode.ai/zen/v1"
 DEFAULT_MODEL = "jev-1.13-free"
+SCHEMA_VERSIONS = (1,)
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,26 @@ def read_json(text):
     return value
 
 
+def load_questions(path):
+    try:
+        document = read_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        raise JevError("questions file must be readable UTF-8 JSON with finite numbers") from None
+    if isinstance(document, dict) and "schema_version" in document:
+        version = document["schema_version"]
+        if type(version) is not int or version not in SCHEMA_VERSIONS:
+            raise JevError("unsupported questions schema_version; supported: 1, or a raw question mapping without a wrapper")
+        if set(document) != {"schema_version", "questions"}:
+            raise JevError("versioned questions document must contain exactly schema_version and questions")
+        document = document["questions"]
+    if not isinstance(document, dict) or not document:
+        raise JevError("questions must be a nonempty API question mapping")
+    for question in document.values():
+        if not isinstance(question, dict) or question.get("type") not in ("choice", "score", "noul", "box"):
+            raise JevError("supported question types: choice, score, noul, box")
+    return document
+
+
 def classify(record, questions, key, backend, timeout):
     if not isinstance(record, dict) or "id" not in record or "state" not in record:
         raise JevError("record must be an object with id and state")
@@ -112,7 +133,7 @@ def classify(record, questions, key, backend, timeout):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["classify", "batch"])
-    parser.add_argument("--questions", required=True, type=Path, help="raw API questions mapping JSON file")
+    parser.add_argument("--questions", required=True, type=Path, help="JSON questions file: raw API mapping or {schema_version: 1, questions}")
     parser.add_argument("--base-url", default=os.environ.get("JEV_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--model", default=os.environ.get("JEV_MODEL", DEFAULT_MODEL))
     parser.add_argument("--timeout", type=float, default=60, help="per-request seconds (default 60)")
@@ -123,12 +144,7 @@ def main(argv=None):
             raise JevError("timeout must be positive and finite")
         if args.command == "batch" and args.input:
             raise JevError("batch reads JSONL from stdin; --input is for classify")
-        questions = read_json(args.questions.read_text(encoding="utf-8"))
-        if not isinstance(questions, dict) or not questions:
-            raise JevError("questions must be a nonempty API question mapping")
-        for question in questions.values():
-            if not isinstance(question, dict) or question.get("type") not in ("choice", "score", "noul", "box"):
-                raise JevError("supported question types: choice, score, noul, box")
+        questions = load_questions(args.questions)
         backend = Backend(args.base_url, args.model)
         if any(q["type"] == "box" for q in questions.values()) and not backend.supports_box:
             raise JevError("Box and assets require a backend and model with image support; free Jev 1.13 is unsupported")
