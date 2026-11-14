@@ -247,6 +247,88 @@ class CliTests(unittest.TestCase):
             code, _, err, sent = self.run_cli('{"id":1,"state":"ok"}', questions=text)
         self.assertEqual((code, sent), (1, []))
         self.assertIn("supported: 1, 2,", err)
+    def summarize(self, lines, *extra, questions=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "results.jsonl"
+            raw = "".join(json.dumps(line) + "\n" for line in lines)
+            source.write_text(raw)
+            args = [sys.executable, str(ROOT / "jev.py"), "summarize", "--input", str(source), *extra]
+            if questions is not None:
+                (Path(tmp) / "q.json").write_text(json.dumps(questions))
+                args += ["--questions", str(Path(tmp) / "q.json")]
+            run = subprocess.run(args, env={"PATH": os.environ["PATH"], "HOME": tmp},
+                                 capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+            self.assertEqual(source.read_text(), raw)
+            return run
+
+    def test_summarize_counts_examples_and_confidence_bins(self):
+        def result(id_, choice, **answer):
+            return {"id": id_, "answers": {"route": {"type": "choice", "choice": choice, **answer,
+                                                     "probabilities": {"a": 0.5, "b": 0.5}}}}
+        lines = [result(1, "a", confidence=0), result("two", "a", confidence=1), result(None, "a", confidence=0.1),
+                 result(4, "a", confidence=0.0999), result(5, "b", confidence=0.95), result(6, "a"),
+                 result(7, "b", confidence="high"), result(8, "b", confidence=True), result(9, "b", confidence=1.5),
+                 result(10, "b", confidence=-0.1)]
+        run = self.summarize(lines, "--question", "route", questions=QUESTIONS)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        summary = json.loads(run.stdout)
+        self.assertEqual(summary["records"], 10)
+        self.assertEqual(summary["counts"], {"a": 5, "b": 5})
+        self.assertEqual(summary["examples"], {"a": [1, "two", None], "b": [5, 7, 8]})
+        bins = summary["confidence"]["bins"]
+        self.assertEqual(list(bins)[0], "0.0-0.1")
+        self.assertEqual((bins["0.0-0.1"], bins["0.1-0.2"], bins["0.9-1.0"]), (2, 1, 2))
+        self.assertEqual(sum(bins.values()), 5)
+        self.assertEqual({k: summary["confidence"][k] for k in ("missing", "malformed", "out_of_range")},
+                         {"missing": 1, "malformed": 2, "out_of_range": 2})
+        self.assertEqual(summary["diagnostics"], ['line 7: confidence "high" is not a number',
+                                                  "line 8: confidence true is not a number",
+                                                  "line 9: confidence 1.5 is outside [0, 1]",
+                                                  "line 10: confidence -0.1 is outside [0, 1]"])
+        self.assertEqual(run.stderr.splitlines(), ["jev: " + d for d in summary["diagnostics"]])
+
+    def test_summarize_selection_empty_input_and_unsupported_answers(self):
+        both = {"id": 1, "answers": {"x": {"type": "choice", "choice": "a"}, "y": {"type": "choice", "choice": "b"}}}
+        run = self.summarize([both])
+        self.assertEqual((run.returncode, run.stdout), (1, ""))
+        self.assertIn("select one question with --question; input has x, y", run.stderr)
+        self.assertEqual(json.loads(self.summarize([both], "--question", "y").stdout)["counts"], {"b": 1})
+        empty = json.loads(self.summarize([], questions=QUESTIONS).stdout)
+        self.assertEqual((empty["question"], empty["records"], empty["counts"], empty["examples"]),
+                         ("route", 0, {"a": 0, "b": 0}, {"a": [], "b": []}))
+        self.assertEqual(sum(empty["confidence"]["bins"].values()), 0)
+        for answer in ({"type": "score", "score": 1}, {"type": "noul", "noul": 0.5}, {"type": "box", "boxes": []}):
+            run = self.summarize([{"id": 1, "answers": {"q": answer}}])
+            self.assertEqual((run.returncode, run.stdout), (1, ""))
+            self.assertIn("line 1; 'q' is not a Choice answer", run.stderr)
+        run = self.summarize([], questions={"q": {"type": "noul"}})
+        self.assertIn("Choice questions only", run.stderr)
+
+    def test_summarize_reads_no_credentials_and_sends_nothing(self):
+        line = json.dumps({"id": 1, "answers": {"route": {"type": "choice", "choice": "a", "confidence": 0.5}}})
+        out = io.StringIO()
+        with patch("jev.api_key") as key, patch("subprocess.run") as keychain, \
+             patch("urllib.request.urlopen") as http, patch("sys.stdin", io.StringIO(line + "\n")), \
+             contextlib.redirect_stdout(out):
+            self.assertEqual(jev.main(["summarize", "--base-url", "https://api.typesafe.ai/v1"]), 0)
+        key.assert_not_called()
+        keychain.assert_not_called()
+        http.assert_not_called()
+        self.assertEqual(json.loads(out.getvalue())["confidence"]["bins"]["0.5-0.6"], 1)
+
+    def test_summarize_bad_line_stops_with_line_number(self):
+        with patch("sys.stdin", io.StringIO('{"id":1,"answers":{"q":{"choice":"a"}}}\nnot json\n')), \
+             contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(jev.main(["summarize", "--question", "q"]), 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue(), "jev: summarize stopped at line 2; invalid JSON record\n")
+
+    def test_classify_and_batch_still_require_questions(self):
+        for command in ("classify", "batch"):
+            run = subprocess.run([sys.executable, str(ROOT / "jev.py"), command], capture_output=True, text=True,
+                                 stdin=subprocess.DEVNULL)
+            self.assertEqual(run.returncode, 2)
+            self.assertIn("--questions is required", run.stderr)
 
     def test_cache_second_run_sends_nothing_and_reattaches_current_ids(self):
         with tempfile.TemporaryDirectory() as cache:

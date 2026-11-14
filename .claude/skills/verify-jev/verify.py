@@ -331,7 +331,7 @@ def journeys(stub_url):
                                                    "--dry-run"], EVAL_RESULTS, code=1,
                  stderr="jev: eval sends no requests; --dry-run is for classify and batch", stdout=lambda o: o == ""),
             Step("--labels is eval-only", ["batch", "--questions", "choice.json", "--labels", "labels.jsonl", *stub_args],
-                 '{"id":1,"state":"x"}', stub=[ok()], code=1, stderr="jev: --labels and --question are for eval",
+                 '{"id":1,"state":"x"}', stub=[ok()], code=1, stderr="jev: --labels is for eval; --question is for eval and summarize",
                  requests=lambda r: r == []),
         ],
         "backend-select": [
