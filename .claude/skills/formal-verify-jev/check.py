@@ -753,7 +753,7 @@ def drive_demo(c, argv, sample_lines):
     folder = root / ".private/demo"
     folder.mkdir(parents=True, exist_ok=True)
     (root / "examples").mkdir(exist_ok=True)
-    (root / "examples/failure-patterns.json").write_text(json.dumps({"failure_pattern": {"criteria": {"fine": "F"}}}))
+    (root / "examples/failure-patterns.json").write_text(json.dumps({"failure_pattern": {"type": "choice", "criteria": {"fine": "F"}}}))
     sample = folder / "sample.jsonl"
     if sample_lines is None:
         sample.unlink(missing_ok=True)
@@ -762,9 +762,18 @@ def drive_demo(c, argv, sample_lines):
     before = sample.read_bytes() if sample.exists() else None
     sent, commands = [], []
 
-    def send(command, input=None, stdout=None, encoding=None, env=None, **kwargs):
-        commands.append(command)
+    def send(command, input=None, stdout=None, encoding=None, env=None, check=False, **kwargs):
         # Model a hostile locale: anything not pinned to UTF-8 on either side of the pipe is ASCII.
+        if command[2] == "summarize":
+            # The real summarize runs in-process; its stdout crosses the same modeled pipe back to the demo.
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(io.StringIO()):
+                code = c.jev.main(command[2:])
+            if check and code:
+                raise subprocess.CalledProcessError(code, command)
+            text = buffer.getvalue().encode((env or {}).get("PYTHONIOENCODING") or "ascii").decode(encoding or "ascii")
+            return types.SimpleNamespace(returncode=code, stdout=text, stderr="")
+        commands.append(command)
         try:
             received = input.encode(encoding or "ascii").decode((env or {}).get("PYTHONIOENCODING") or "ascii")
         except UnicodeError:
@@ -788,11 +797,12 @@ def drive_demo(c, argv, sample_lines):
     after = sample.read_bytes() if sample.exists() else None
     summary = (folder / "summary.json").read_text() if (folder / "summary.json").exists() else ""
     (folder / "summary.json").unlink(missing_ok=True)
+    c.last_summary = json.loads(summary) if summary else {}
     return code, sent, before == after, out.getvalue() + err.getvalue() + summary, commands
 
 
 def check_demo_send(c):
-    raw = [{"id": f"user{i}@example.test", "state": {"messages": [{"role": "user", "text": "café ✓ " + t}]}}
+    raw = [{"id": f"user{i}@example.test ✓", "state": {"messages": [{"role": "user", "text": "café ✓ " + t}]}}
            for i, (_, t, _) in enumerate(SECRETS)]
     for opt_out in (False, True):
         c.cases += 1
@@ -821,6 +831,11 @@ def check_demo_send(c):
             c.fail("demo-opt-out-sends-raw", case, f"{len(leaked)} of {len(SECRETS)} values sent")
         if not opt_out and any(part in output for _, _, part in SECRETS):
             c.fail("redact-metadata-no-leak", case, output[:200])
+        summary = c.last_summary
+        if summary.get("classification_counts") != {"fine": len(raw)} \
+                or summary.get("example_ids_by_category") != {"fine": [r["id"] for r in raw[:3]]} \
+                or summary.get("confidence", {}).get("missing") != len(raw):
+            c.fail("demo-send-summarize", case, f"summary {json.dumps(summary)[:200]}")
     for limit, count in itertools.product([-1, 0, 1, 2, 20, 21], [None, 0, 1, 2, 20, 21]):
         c.cases += 1
         records = None if count is None else [{"id": i, "state": "x"} for i in range(count)]
@@ -1308,6 +1323,11 @@ MUTANTS = [
 DEMO_MUTANTS = [
     ("demo send without the cache", "demo-send-caches",
      [(', "--cache", str(folder / "cache")]', "]")]),
+    ("summarize pipe not pinned to UTF-8", "demo-send-clean-exit",
+     [('capture_output=True, check=True,\n                                 encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"})',
+       'capture_output=True, check=True, text=True)')]),
+    ("demo drops summarize example IDs", "demo-send-summarize",
+     [('summary["example_ids_by_category"] = counts["examples"]', 'summary["example_ids_by_category"] = {}')]),
     ("send skips the second redaction pass", "demo-send-redacts-outgoing",
      [('outgoing, summary["redaction"] = redact_records(records)',
        'outgoing, summary["redaction"] = records, {"policy": REDACTION_POLICY, "counts": {}}')]),
