@@ -486,6 +486,7 @@ def check_question_files(c):
                     respond=lambda i, r: json.dumps(ok_response(i)).encode())
         if not c.clean_exit("questions-clean-exit", case, run):
             continue
+        check_question_file_dry_run(c, case, command, document, run)
         expected = None if isinstance(document, bytes) else expected_questions(document)
         if (run.code == 0) != (expected is not None):
             c.fail("questions-accept-iff-valid", case, f"exit {run.code} stderr {run.stderr[:120]!r}")
@@ -1028,6 +1029,24 @@ def check_eval(c):
             c.fail("eval-errors", case, f"exit {run.code} stdout {run.stdout[:80]!r} stderr {run.stderr!r}")
 
 
+def check_question_file_dry_run(c, case, command, document, real):
+    c.cases += 1
+    case = case.replace("questions ", "questions --dry-run ", 1)
+    run = drive(c.jev, [command, "--dry-run", "--questions", c.questions_file(document)], '{"id":"q","state":"x"}\n',
+                respond=lambda i, r: json.dumps(ok_response(i)).encode())
+    if not c.clean_exit("dry-run-clean-exit", case, run):
+        return
+    if run.requests or (run.code, run.stderr) != (real.code, real.stderr) or (run.code != 0 and run.stdout):
+        c.fail("dry-run-questions-like-send", case, f"dry exit {run.code} {run.stderr!r}, send exit {real.code} {real.stderr!r}")
+        return
+    if run.code == 0:
+        row, = json.loads(run.stdout)["records"]
+        questions = json.loads(real.requests[0]["request"].data)["questions"]
+        if row["request_bytes"] != len(real.requests[0]["request"].data) \
+                or row["question_tokens_estimate"] != readme_estimate(questions):
+            c.fail("dry-run-questions-like-send", case, f"row {row} vs sent body of {len(real.requests[0]['request'].data)} bytes")
+
+
 # Broken variants of jev.py. Each must make the named property fail, or the check proves nothing.
 
 MUTANTS = [
@@ -1128,6 +1147,9 @@ MUTANTS = [
     ("dry run measures unescaped JSON", "dry-run-measures-sent-bytes",
      [('"request_bytes": len(request_body(payload))',
        '"request_bytes": len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))')]),
+    ("dry run measures the questions wrapper", "dry-run-questions-like-send",
+     [('"question_tokens_estimate": estimate_tokens(questions)',
+       '"question_tokens_estimate": estimate_tokens({"schema_version": 1, "questions": questions})')]),
     ("dry run total drops a batch row", "dry-run-total-is-sum",
      [('total = sum(row["input_tokens_estimate"] for row in rows)',
        'total = sum(row["input_tokens_estimate"] for row in rows[1:]) or rows[0]["input_tokens_estimate"]')]),
