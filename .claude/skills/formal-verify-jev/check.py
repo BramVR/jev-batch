@@ -1143,7 +1143,11 @@ def check_cache(c, depth):
         argv = ["classify", "--questions", questions, "--cache", str(cache)]
         record = '{"id":"c","state":"x"}'
         drive(c.jev, argv, record, respond=responses)
-        [entry] = cache_entries(cache)
+        entries = cache_entries(cache)
+        if len(entries) != 1:
+            c.fail("cache-stores-success", f"cache corrupt={name}", f"{len(entries)} entries after one successful request")
+            continue
+        [entry] = entries
         good = entry.read_bytes()
         stored = json.loads(good)
         damage = good[:len(good) // 2] if corrupt is None else corrupt if isinstance(corrupt, bytes) else corrupt(stored)
@@ -1158,6 +1162,27 @@ def check_cache(c, depth):
             c.fail("cache-corrupt-refetch", case, f"exit {refetch.code}, {len(refetch.requests)} requests, stdout {refetch.stdout[:120]!r}")
         if len(reuse.requests) != 0 or not same(json.loads(reuse.stdout or "null"), fresh):
             c.fail("cache-corrupt-rewritten", case, f"third run sent {len(reuse.requests)}, stdout {reuse.stdout[:120]!r}")
+
+    # Identical bodies within one batch. Sequentially the second line hits the first line's entry; above
+    # concurrency 1 both can be in flight before either stores, which the README documents.
+    for concurrency in (1, 2, 3):
+        c.cases += 1
+        cache = c.tmp / "cache-duplicates"
+        shutil.rmtree(cache, ignore_errors=True)
+        lines = '{"id":1,"state":"dup"}\n{"id":2,"state":"dup"}\n{"id":3,"state":"other"}\n'
+        run = drive(c.jev, ["batch", "--questions", questions, "--cache", str(cache), "--concurrency", str(concurrency)],
+                    lines, respond=lambda i, r: json.dumps(ok_response(0)).encode())
+        case = f"cache duplicates c={concurrency}"
+        if not c.clean_exit("cache-clean-exit", case, run):
+            continue
+        dup_sent = sum(json.loads(req["request"].data)["state"] == "dup" for req in run.requests)
+        got = [json.loads(x) for x in run.stdout.splitlines()]
+        expected = [{"id": i, **ok_response(0)} for i in (1, 2, 3)]
+        bound = 1 if concurrency == 1 else 2
+        if run.code != 0 or not 1 <= dup_sent <= bound or len(cache_entries(cache)) != 2 \
+                or len(got) != 3 or not all(map(same, got, expected)):
+            c.fail("cache-duplicate-within-run", case,
+                   f"exit {run.code}, duplicate sent {dup_sent} times (max {bound}), {len(cache_entries(cache))} entries")
 
     # Resume: an interrupted batch (default --retries 3) then a rerun where every request succeeds. Lines are
     # keyed by position, as in check_batch, so retried requests count against their own line.
@@ -1458,6 +1483,8 @@ MUTANTS = [
      [('entry.get("version") != CACHE_VERSION or entry.get("key") != path.stem', "False")]),
     ("cache keyed per questions file", "cache-hit-across-question-file-forms",
      [("cache = Cache(args.cache) if args.cache else None", "cache = Cache(args.cache / args.questions.name) if args.cache else None")]),
+    ("successful responses never stored", "cache-stores-after-retry",
+     [("        if cache:\n            cache.store(entry, result)\n", "")]),
     ("cache never read", "cache-resume-sends-only-missing",
      [("result = cache.load(entry) if entry else None", "result = None")]),
     ("eval reads credentials", "eval-offline",
