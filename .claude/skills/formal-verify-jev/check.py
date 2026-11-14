@@ -30,8 +30,8 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "1131bd1990f2a7898f431a0f1f108681db2a7781",
-    "scripts/demo_sessions.py": "5a45729868d435be631d5df31262a2218e158fb8",
+    "jev.py": "09217c5cef03cf4a124c851ce648e9a8a0df07a0",
+    "scripts/demo_sessions.py": "aefdd89b19f0dc1fb55430cdf2227387b93c7bab",
 }
 KEY = "sentinel-key-not-real"
 SECRET_BODY = "SECRET-BODY-must-not-leak"
@@ -479,17 +479,25 @@ def expected_questions(document):
 
 
 def check_question_files(c):
-    for (label, document), command in itertools.product(question_documents(), ("classify", "batch")):
+    # summarize reads the same file for label order: empty input and an absent --question name isolate file loading.
+    for (label, document), command in itertools.product(question_documents(), ("classify", "batch", "summarize")):
         c.cases += 1
         case = f"questions {command} {label}"
-        run = drive(c.jev, [command, "--questions", c.questions_file(document)], '{"id":"q","state":"x"}\n',
+        summarize = command == "summarize"
+        argv = [command, "--questions", c.questions_file(document)] + (["--question", "zz"] if summarize else [])
+        run = drive(c.jev, argv, "" if summarize else '{"id":"q","state":"x"}\n',
                     respond=lambda i, r: json.dumps(ok_response(i)).encode())
         if not c.clean_exit("questions-clean-exit", case, run):
             continue
-        check_question_file_dry_run(c, case, command, document, run)
+        if not summarize:
+            check_question_file_dry_run(c, case, command, document, run)
         expected = None if isinstance(document, bytes) else expected_questions(document)
         if (run.code == 0) != (expected is not None):
             c.fail("questions-accept-iff-valid", case, f"exit {run.code} stderr {run.stderr[:120]!r}")
+            continue
+        if expected is not None and summarize:
+            if run.requests or json.loads(run.stdout).get("records") != 0:
+                c.fail("questions-summarize-offline", case, f"{len(run.requests)} requests stdout {run.stdout[:120]!r}")
             continue
         if expected is not None:
             bodies = [json.loads(r["request"].data) for r in run.requests]
@@ -526,6 +534,120 @@ def check_question_files(c):
         if run.code != 1 or run.stdout or len(lines) != 1 or not lines[0].startswith("jev: ") \
                 or lines[0] == GENERIC_ERROR or PRIVATE in run.stderr:
             c.fail("questions-eval-same-loader", case, f"exit {run.code} stderr {run.stderr[:200]!r}")
+
+
+# P8. Summarize: offline, every record counted once, bins and diagnostics match an independent oracle.
+
+SUMMARY_ABSENT = object()
+CONFIDENCES = [SUMMARY_ABSENT, 0, 0.0, -0.0, 0.1, 0.09999999999999999, 0.5, 0.30000000000000004, 0.9, 0.9999999999999999,
+               1, 1.0, -1e-9, 1.0000000000000002, 2, "0.5", True, None]
+SUMMARY_KINDS = {f"{label}:{i}": (label, conf) for label in ("a", "b") for i, conf in enumerate(CONFIDENCES)}
+SUMMARY_KINDS.update({"bad_json": "{", "no_id": '{"answers":{"q":{"choice":"a"}}}',
+                      "score": '{"id":"s","answers":{"q":{"type":"score","score":1}}}'})
+SUMMARY_LABELS = ["a", "b", "c"]
+LONG_KINDS = ["a:0", "b:10", "score"]
+BIN_NAMES = [f"{i / 10:.1f}-{(i + 1) / 10:.1f}" for i in range(10)]
+
+
+def summary_line(kind, i):
+    spec = SUMMARY_KINDS[kind]
+    if isinstance(spec, str):
+        return spec
+    label, conf = spec
+    answer = {"type": "choice", "choice": label, "probabilities": {"a": 0.5, "b": 0.5}}
+    if conf is not SUMMARY_ABSENT:
+        answer["confidence"] = conf
+    return json.dumps({"id": [f"id{i}", i, None][i % 3], "answers": {"q": answer}})
+
+
+def oracle_bin(value):
+    return next(i for i in range(9, -1, -1) if value >= i / 10 or i == 0) if value < 1 else 9
+
+
+def check_summarize(c, depth):
+    choice = {"type": "choice", "criteria": {label: label for label in SUMMARY_LABELS}}
+    files = {"seeded": c.questions_file({"q": choice}), "inferred": c.questions_file({"q": choice, "n": NOUL}),
+             "versioned": c.questions_file({"schema_version": 1, "questions": {"q": choice, "n": NOUL}})}
+    # Short sequences cover every record kind; four-record sequences make the three-ID example cap bind.
+    sequences = [seq for n in range(depth + 1) for seq in itertools.product(SUMMARY_KINDS, repeat=n)]
+    sequences += list(itertools.product(LONG_KINDS, repeat=4))
+    # inferred: no --question, a two-question file, so the name comes from the input and labels still seed.
+    for seq, mode in itertools.product(sequences, ("seeded", "plain", "inferred", "versioned")):
+        n = len(seq)
+        seeded = mode != "plain"
+        c.cases += 1
+        lines = [summary_line(kind, i) for i, kind in enumerate(seq)]
+        argv = ["summarize", "--base-url", "https://api.typesafe.ai/v1"] + ([] if mode == "inferred" else ["--question", "q"])
+        run = drive(c.jev, argv + (["--questions", files[mode]] if seeded else []),
+                    "".join(line + "\n" for line in lines), {"TYPESAFE_API_KEY": KEY})
+        case = f"summarize {mode} " + ",".join(seq)
+        if not c.clean_exit("summarize-clean-exit", case, run):
+            continue
+        if run.requests or run.key_reads:
+            c.fail("summarize-offline", case, f"{len(run.requests)} requests, {run.key_reads} credential reads")
+        if mode == "inferred" and n == 0:
+            if run.code != 1 or run.stdout or "select one question with --question" not in run.stderr:
+                c.fail("summarize-selection", case, f"exit {run.code} stderr {run.stderr!r}")
+            continue
+        parse_bad = [i for i, kind in enumerate(seq) if kind in ("bad_json", "no_id")]
+        answer_bad = [i for i, kind in enumerate(seq) if kind == "score"]
+        if parse_bad or answer_bad:
+            line = (parse_bad or answer_bad)[0] + 1
+            if run.code != 1 or run.stdout or not run.stderr.startswith(f"jev: summarize stopped at line {line}; "):
+                c.fail("summarize-stop-line", case, f"exit {run.code} stderr {run.stderr!r}, expected line {line}")
+            continue
+        counts = dict.fromkeys(SUMMARY_LABELS if seeded else [], 0)
+        examples = {label: [] for label in counts}
+        bins, classes, diagnostics = [0] * 10, {"missing": 0, "malformed": 0, "out_of_range": 0}, []
+        for i, kind in enumerate(seq):
+            label, conf = SUMMARY_KINDS[kind]
+            counts[label] = counts.get(label, 0) + 1
+            examples.setdefault(label, [])
+            if len(examples[label]) < 3:
+                examples[label].append(json.loads(lines[i])["id"])
+            if conf is SUMMARY_ABSENT:
+                classes["missing"] += 1
+            elif type(conf) not in (int, float):
+                classes["malformed"] += 1
+                diagnostics.append(f"line {i + 1}: confidence {json.dumps(conf)} is not a number")
+            elif not 0 <= conf <= 1:
+                classes["out_of_range"] += 1
+                diagnostics.append(f"line {i + 1}: confidence {json.dumps(conf)} is outside [0, 1]")
+            else:
+                bins[oracle_bin(conf)] += 1
+        try:
+            got = json.loads(run.stdout)
+        except ValueError:
+            c.fail("summarize-output", case, f"exit {run.code} stdout {run.stdout[:120]!r}")
+            continue
+        conf_out = got.get("confidence", {})
+        checks = {
+            "summarize-exit": run.code == 0 and run.stderr == "".join(f"jev: {d}\n" for d in diagnostics),
+            "summarize-counts": got.get("records") == n and same(got.get("counts"), counts),
+            "summarize-examples": same(got.get("examples"), examples),
+            "summarize-bins": list(conf_out.get("bins", {})) == BIN_NAMES and list(conf_out["bins"].values()) == bins,
+            "summarize-confidence-classes": all(conf_out.get(k) == v for k, v in classes.items()),
+            "summarize-diagnostics": got.get("diagnostics") == diagnostics,
+            "summarize-denominator": sum(conf_out.get("bins", {}).values()) + sum(conf_out.get(k, 0) for k in classes)
+            == n == sum(got.get("counts", {}).values()),
+        }
+        for prop, ok in checks.items():
+            if not ok:
+                c.fail(prop, case, f"exit {run.code} stdout {run.stdout[:300]!r} stderr {run.stderr[:120]!r}")
+
+    results = c.tmp / "summarize-flags.jsonl"
+    results.write_text(summary_line("a:1", 0) + "\n", encoding="utf-8")
+    for flag, expected in ((["--cache", str(c.tmp / "summarize-cache")], "jev: summarize sends no requests; --cache is for classify and batch\n"),
+                           (["--dry-run"], "jev: summarize sends no requests; --dry-run is for classify and batch\n"),
+                           (["--labels", str(results)], "jev: --labels is for eval; --question is for eval and summarize\n")):
+        c.cases += 1
+        run = drive(c.jev, ["summarize", "--input", str(results), *flag], "", {"TYPESAFE_API_KEY": KEY})
+        case = f"summarize {flag[0]}"
+        if not c.clean_exit("summarize-clean-exit", case, run):
+            continue
+        if (run.code, run.stdout, run.stderr) != (1, "", expected) or run.requests or run.key_reads \
+                or (c.tmp / "summarize-cache").exists():
+            c.fail("summarize-flag-errors", case, f"exit {run.code} stdout {run.stdout[:80]!r} stderr {run.stderr!r}")
 
 
 # P5. Demo redaction: no planted value survives, structure and IDs stay, a second pass is a no-op,
@@ -646,7 +768,7 @@ def drive_demo(c, argv, sample_lines):
     folder = root / ".private/demo"
     folder.mkdir(parents=True, exist_ok=True)
     (root / "examples").mkdir(exist_ok=True)
-    (root / "examples/failure-patterns.json").write_text(json.dumps({"failure_pattern": {"criteria": {"fine": "F"}}}))
+    (root / "examples/failure-patterns.json").write_text(json.dumps({"failure_pattern": {"type": "choice", "criteria": {"fine": "F"}}}))
     sample = folder / "sample.jsonl"
     if sample_lines is None:
         sample.unlink(missing_ok=True)
@@ -655,9 +777,18 @@ def drive_demo(c, argv, sample_lines):
     before = sample.read_bytes() if sample.exists() else None
     sent, commands = [], []
 
-    def send(command, input=None, stdout=None, encoding=None, env=None, **kwargs):
-        commands.append(command)
+    def send(command, input=None, stdout=None, encoding=None, env=None, check=False, **kwargs):
         # Model a hostile locale: anything not pinned to UTF-8 on either side of the pipe is ASCII.
+        if command[2] == "summarize":
+            # The real summarize runs in-process; its stdout crosses the same modeled pipe back to the demo.
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(io.StringIO()):
+                code = c.jev.main(command[2:])
+            if check and code:
+                raise subprocess.CalledProcessError(code, command)
+            text = buffer.getvalue().encode((env or {}).get("PYTHONIOENCODING") or "ascii").decode(encoding or "ascii")
+            return types.SimpleNamespace(returncode=code, stdout=text, stderr="")
+        commands.append(command)
         try:
             received = input.encode(encoding or "ascii").decode((env or {}).get("PYTHONIOENCODING") or "ascii")
         except UnicodeError:
@@ -681,11 +812,12 @@ def drive_demo(c, argv, sample_lines):
     after = sample.read_bytes() if sample.exists() else None
     summary = (folder / "summary.json").read_text() if (folder / "summary.json").exists() else ""
     (folder / "summary.json").unlink(missing_ok=True)
+    c.last_summary = json.loads(summary) if summary else {}
     return code, sent, before == after, out.getvalue() + err.getvalue() + summary, commands
 
 
 def check_demo_send(c):
-    raw = [{"id": f"user{i}@example.test", "state": {"messages": [{"role": "user", "text": "café ✓ " + t}]}}
+    raw = [{"id": f"user{i}@example.test ✓", "state": {"messages": [{"role": "user", "text": "café ✓ " + t}]}}
            for i, (_, t, _) in enumerate(SECRETS)]
     for opt_out in (False, True):
         c.cases += 1
@@ -714,6 +846,11 @@ def check_demo_send(c):
             c.fail("demo-opt-out-sends-raw", case, f"{len(leaked)} of {len(SECRETS)} values sent")
         if not opt_out and any(part in output for _, _, part in SECRETS):
             c.fail("redact-metadata-no-leak", case, output[:200])
+        summary = c.last_summary
+        if summary.get("classification_counts") != {"fine": len(raw)} \
+                or summary.get("example_ids_by_category") != {"fine": [r["id"] for r in raw[:3]]} \
+                or summary.get("confidence", {}).get("missing") != len(raw):
+            c.fail("demo-send-summarize", case, f"summary {json.dumps(summary)[:200]}")
     for limit, count in itertools.product([-1, 0, 1, 2, 20, 21], [None, 0, 1, 2, 20, 21]):
         c.cases += 1
         records = None if count is None else [{"id": i, "state": "x"} for i in range(count)]
@@ -1148,7 +1285,7 @@ MUTANTS = [
        '        if args.command == "eval":\n            questions = read_json(args.questions.read_text(encoding="utf-8"))\n'
        '            if not args.labels:')]),
     ("eval accepts --cache and ignores it", "eval-errors",
-     [('        if args.command == "eval" and args.cache:\n', '        if False:\n')]),
+     [('        if offline and args.cache:\n', '        if False:\n')]),
     ("eval writes the labels file", "eval-inputs-unchanged",
      [('            with args.labels.open(encoding="utf-8") as labels:',
        '            args.labels.write_text(args.labels.read_text(encoding="utf-8") + " ", encoding="utf-8")\n'
@@ -1177,16 +1314,37 @@ MUTANTS = [
        "                cache and cache.store(cache.path(backend.endpoint, request_body(request_payload(record, questions, backend))), {\"answers\": {}})\n"
        "                return estimate(record, questions, backend)")]),
     ("eval accepts --dry-run and ignores it", "eval-errors",
-     [('        if args.command == "eval" and args.dry_run:\n', '        if False:\n')]),
+     [('        if offline and args.dry_run:\n', '        if False:\n')]),
     ("dry run total drops a batch row", "dry-run-total-is-sum",
      [('total = sum(row["input_tokens_estimate"] for row in rows)',
        'total = sum(row["input_tokens_estimate"] for row in rows[1:]) or rows[0]["input_tokens_estimate"]')]),
+    ("lower bin edge excluded", "summarize-bins",
+     [("bins[bin_names[bisect_right(CALIBRATION_EDGES, value)]]", "bins[bin_names[bisect_left(CALIBRATION_EDGES, value)]]"),
+      ("from bisect import bisect_right\n", "from bisect import bisect_left, bisect_right\n")]),
+    ("boolean confidence binned as a number", "summarize-confidence-classes",
+     [("if isinstance(value, bool) or not isinstance(value, (int, float)):", "if not isinstance(value, (int, float)):")]),
+    ("example IDs unbounded", "summarize-examples", [("        if len(bucket) < 3:\n", "        if True:\n")]),
+    ("labels seeded from the --question flag, not the selected question", "summarize-counts",
+     [("def summarize(lines, question=None, questions=None):\n", "def summarize(lines, question=None, questions=None):\n    asked = question\n"),
+      ("    if questions and question in questions:\n", "    if questions and asked in questions:\n")]),
+    ("summarize parses --questions without load_questions", "summarize-counts",
+     [("        questions = load_questions(args.questions)\n        if question is None",
+       "        questions = read_json(args.questions.read_text(encoding=\"utf-8\"))\n        if question is None")]),
+    ("summarize treated as a sending command", "summarize-flag-errors",
+     [('offline = args.command in ("eval", "summarize")', 'offline = args.command == "eval"')]),
+    ("summarize reads credentials", "summarize-offline",
+     [("            return run_summarize(args)", "            api_key()\n            return run_summarize(args)")]),
 ]
 
 # Broken variants of scripts/demo_sessions.py, checked the same way.
 DEMO_MUTANTS = [
     ("demo send without the cache", "demo-send-caches",
      [(', "--cache", str(folder / "cache")]', "]")]),
+    ("summarize pipe not pinned to UTF-8", "demo-send-clean-exit",
+     [('capture_output=True, check=True,\n                                 encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"})',
+       'capture_output=True, check=True, text=True)')]),
+    ("demo drops summarize example IDs", "demo-send-summarize",
+     [('summary["example_ids_by_category"] = counts["examples"]', 'summary["example_ids_by_category"] = {}')]),
     ("send skips the second redaction pass", "demo-send-redacts-outgoing",
      [('outgoing, summary["redaction"] = redact_records(records)',
        'outgoing, summary["redaction"] = records, {"policy": REDACTION_POLICY, "counts": {}}')]),
@@ -1232,14 +1390,15 @@ def run_all(jev, demo, depth, only=None):
                          ("numbers", lambda: check_numbers(c)), ("questions", lambda: check_question_files(c)),
                          ("redaction", lambda: (check_redaction(c), check_redact_before_cap(c), check_demo_send(c))),
                          ("cache", lambda: check_cache(c, min(depth, 2))),
-                         ("eval", lambda: check_eval(c))):
+                         ("eval", lambda: check_eval(c)),
+                         ("summarize", lambda: check_summarize(c, min(depth, 2)))):
             if only in (None, name):
                 fn()
         return c
 
 
 SECTIONS = {"batch": "batch", "numbers": "numbers", "questions": "questions", "cache": "cache", "eval": "eval",
-            "redact": "redaction", "demo": "redaction"}
+            "summarize": "summarize", "redact": "redaction", "demo": "redaction"}
 
 
 # Properties checked outside the section their prefix names; a mutant must run where its property is checked.
@@ -1284,7 +1443,7 @@ def stale():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--depth", type=int, default=3, help="max batch length to enumerate (default 3)")
-    parser.add_argument("--only", choices=["batch", "requests", "numbers", "questions", "redaction", "cache", "eval"])
+    parser.add_argument("--only", choices=["batch", "requests", "numbers", "questions", "redaction", "cache", "eval", "summarize"])
     parser.add_argument("--mutants", action="store_true", help="also prove each property fails on a broken jev.py")
     parser.add_argument("--stale", action="store_true", help="only report covered files whose content differs from SYNC_BLOBS")
     args = parser.parse_args()

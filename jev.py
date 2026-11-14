@@ -347,32 +347,90 @@ def evaluate(name, options, label_lines, prediction_lines):
     }
 
 
+def summarize(lines, question=None, questions=None):
+    records = []
+    for number, line in enumerate(lines, 1):
+        try:
+            record = read_json(line)
+        except (ValueError, RecursionError):
+            raise JevError(f"summarize stopped at line {number}; invalid JSON record") from None
+        if not isinstance(record, dict) or "id" not in record or not isinstance(record.get("answers"), dict):
+            raise JevError(f"summarize stopped at line {number}; record must be an object with id and answers")
+        records.append(record)
+    if question is None:
+        names = list(dict.fromkeys(name for record in records for name in record["answers"]))
+        if len(names) != 1:
+            raise JevError("select one question with --question; input has " + (", ".join(names) or "no answers"))
+        question = names[0]
+    labels = ()
+    if questions and question in questions:
+        spec = questions[question]
+        if not isinstance(spec, dict) or spec.get("type") != "choice" or not isinstance(spec.get("criteria"), dict):
+            raise JevError(f"summarize supports Choice questions only; {question!r} is not one")
+        labels = list(spec["criteria"])
+    counts = dict.fromkeys(labels, 0)
+    examples = {label: [] for label in labels}
+    edges = (0.0, *CALIBRATION_EDGES, 1.0)
+    bins = {f"{low:.1f}-{high:.1f}": 0 for low, high in zip(edges, edges[1:])}
+    bin_names = list(bins)
+    confidence = {"bins": bins, "missing": 0, "malformed": 0, "out_of_range": 0}
+    diagnostics = []
+    for number, record in enumerate(records, 1):
+        answer = record["answers"].get(question)
+        if not isinstance(answer, dict) or answer.get("type", "choice") != "choice" or not isinstance(answer.get("choice"), str):
+            raise JevError(f"summarize stopped at line {number}; {question!r} is not a Choice answer")
+        label = answer["choice"]
+        counts[label] = counts.get(label, 0) + 1
+        bucket = examples.setdefault(label, [])
+        if len(bucket) < 3:
+            bucket.append(record["id"])
+        if "confidence" not in answer:
+            confidence["missing"] += 1
+            continue
+        value = answer["confidence"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            confidence["malformed"] += 1
+            diagnostics.append(f"line {number}: confidence {json.dumps(value, ensure_ascii=False)} is not a number")
+        elif not 0 <= value <= 1:
+            confidence["out_of_range"] += 1
+            diagnostics.append(f"line {number}: confidence {json.dumps(value)} is outside [0, 1]")
+        else:
+            bins[bin_names[bisect_right(CALIBRATION_EDGES, value)]] += 1
+    return {"question": question, "records": len(records), "counts": counts, "examples": examples,
+            "confidence": confidence, "diagnostics": diagnostics}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["classify", "batch", "eval"])
-    parser.add_argument("--questions", required=True, type=Path, help=f"JSON questions file: raw API mapping or {{schema_version: {'|'.join(map(str, SCHEMA_VERSIONS))}, questions}}")
+    parser.add_argument("command", choices=["classify", "batch", "eval", "summarize"])
+    parser.add_argument("--questions", type=Path, help=f"JSON questions file: raw API mapping or {{schema_version: {'|'.join(map(str, SCHEMA_VERSIONS))}, questions}}; summarize uses it only for label order")
     parser.add_argument("--base-url", default=os.environ.get("JEV_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--model", default=os.environ.get("JEV_MODEL", DEFAULT_MODEL))
     parser.add_argument("--timeout", type=float, default=60, help="per-request seconds (default 60)")
-    parser.add_argument("--input", type=Path, help="one {id,state} JSON record; default stdin")
-    parser.add_argument("--cache", type=Path, metavar="DIR", help="reuse and store successful responses in DIR; off by default")
+    parser.add_argument("--input", type=Path, help="classify: one {id,state} JSON record; summarize: results JSONL; default stdin")
+    parser.add_argument("--cache", type=Path, metavar="DIR", help="classify/batch: reuse and store successful responses in DIR; off by default")
     parser.add_argument("--labels", type=Path, help="eval: hand-labeled {id,label} JSONL file")
-    parser.add_argument("--question", help="eval: Choice question name; default the only question")
+    parser.add_argument("--question", help="eval, summarize: Choice question name; default the only question")
     parser.add_argument("--dry-run", action="store_true",
                         help="validate, then print estimated input tokens and cost as one JSON object; "
                              "sends nothing and reads no credentials")
     args = parser.parse_args(argv)
+    if args.command != "summarize" and args.questions is None:
+        parser.error("--questions is required for classify, batch, and eval")
+    offline = args.command in ("eval", "summarize")
     try:
         if not math.isfinite(args.timeout) or args.timeout <= 0:
             raise JevError("timeout must be positive and finite")
-        if args.command != "classify" and args.input:
-            raise JevError(f"{args.command} reads JSONL from stdin; --input is for classify")
-        if args.command != "eval" and (args.labels or args.question is not None):
-            raise JevError("--labels and --question are for eval")
-        if args.command == "eval" and args.cache:
-            raise JevError("eval sends no requests; --cache is for classify and batch")
-        if args.command == "eval" and args.dry_run:
-            raise JevError("eval sends no requests; --dry-run is for classify and batch")
+        if args.command not in ("classify", "summarize") and args.input:
+            raise JevError(f"{args.command} reads JSONL from stdin; --input is for classify and summarize")
+        if (args.labels and args.command != "eval") or (args.question is not None and not offline):
+            raise JevError("--labels is for eval; --question is for eval and summarize")
+        if offline and args.cache:
+            raise JevError(f"{args.command} sends no requests; --cache is for classify and batch")
+        if offline and args.dry_run:
+            raise JevError(f"{args.command} sends no requests; --dry-run is for classify and batch")
+        if args.command == "summarize":
+            return run_summarize(args)
         questions = load_questions(args.questions)
         if args.command == "eval":
             if not args.labels:
@@ -422,6 +480,24 @@ def main(argv=None):
     except (ValueError, OSError, UnicodeError, subprocess.SubprocessError, RecursionError):
         print("jev: could not read input, credentials, or API JSON", file=sys.stderr)
         return 1
+    return 0
+
+
+def run_summarize(args):
+    question, questions = args.question, None
+    if args.questions:
+        questions = load_questions(args.questions)
+        if question is None and len(questions) == 1:
+            question = next(iter(questions))
+    if args.input:
+        # File iteration splits on newlines only, like stdin; str.splitlines would also split U+2028 inside JSON strings.
+        with args.input.open(encoding="utf-8") as source:
+            summary = summarize(source, question, questions)
+    else:
+        summary = summarize(sys.stdin, question, questions)
+    for diagnostic in summary["diagnostics"]:
+        print("jev: " + diagnostic, file=sys.stderr)
+    print(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False))
     return 0
 
 

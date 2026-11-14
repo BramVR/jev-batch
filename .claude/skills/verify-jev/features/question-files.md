@@ -18,6 +18,7 @@ A user passes `--questions` a version-1 document (`{"schema_version": 1, "questi
 - `python3 jev.py classify|batch --questions examples/failure-patterns.v1.json`
 - `python3 jev.py classify|batch --questions examples/failure-patterns.json`
 - `eval` reads `--questions` through the same loader; its steps live in [eval](./eval.md).
+- `python3 jev.py summarize --questions <either form>` loads the file the same way; the `summarize` journey drives that path.
 
 ## Driving it with verify.py
 

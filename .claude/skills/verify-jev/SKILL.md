@@ -1,6 +1,6 @@
 ---
 name: verify-jev
-description: "Drive the jev-cli command line (jev.py classify/batch including --dry-run estimates, eval, scripts/demo_sessions.py) end to end against a fresh copy and capture evidence. Use after changing jev.py, the demo script or its redaction, flags, backend selection, cache, pricing, or output, or when asked to prove the CLI works."
+description: "Drive the jev-cli command line (jev.py classify/batch including --dry-run estimates, eval, summarize, scripts/demo_sessions.py) end to end against a fresh copy and capture evidence. Use after changing jev.py, the demo script or its redaction, flags, backend selection, cache, pricing, or output, or when asked to prove the CLI works."
 ---
 
 # Verify jev-cli
@@ -21,7 +21,7 @@ Read-only. Reports Python version, git state, whether loopback can host the stub
 
 ```sh
 python3 .claude/skills/verify-jev/verify.py run                     # all offline journeys, worktree build
-python3 .claude/skills/verify-jev/verify.py run batch eval          # chosen journeys
+python3 .claude/skills/verify-jev/verify.py run batch eval summarize  # chosen journeys
 python3 .claude/skills/verify-jev/verify.py run demo-redaction      # demo redaction, synthetic HOME
 python3 .claude/skills/verify-jev/verify.py run --ref HEAD          # committed code only
 python3 .claude/skills/verify-jev/verify.py run --live live-opencode  # 3 real OpenCode requests

@@ -4,7 +4,7 @@
 
 ## Sub-features
 
-- `batch-order` output order follows input; duplicate IDs stay duplicated.
+- `batch-order` output order follows input; duplicate IDs stay duplicated; an ID holding U+2028 stays on its own output line.
 - `batch-api-failure` an API failure on line N exits 1 with `batch stopped at line N`, keeps lines 1..N-1, and sends nothing after N.
 - `batch-invalid-line` an invalid line N is never sent.
 - `batch-blank-line` a blank line is an error.
@@ -24,5 +24,7 @@ Preconditions:
 - **Exhaustive cover.** The flush and prefix invariant over every short sequence of line outcomes lives in the `formal-verify-jev` skill.
 
 ## Gotchas
+
+- Output uses `ensure_ascii=False`, so U+2028 can appear raw inside a line. Split JSONL on `\n` only, never `str.splitlines()`.
 
 - Stderr for an unparseable API response says `invalid JSON record`, blaming the input line. This is known finding F2 in `formal-verify-jev`; do not assert that wording as correct behavior.
