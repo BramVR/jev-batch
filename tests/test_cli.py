@@ -37,7 +37,7 @@ class CliTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "q.json"
-            path.write_text(questions if isinstance(questions, str) else json.dumps(questions))
+            path.write_text(questions if isinstance(questions, str) else json.dumps(questions), encoding="utf-8")
             out, err = io.StringIO(), io.StringIO()
             with patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-only", **(env or {})}, clear=True), \
                  patch("sys.stdin", io.StringIO(data)), \
@@ -181,7 +181,7 @@ class CliTests(unittest.TestCase):
             worker.start()
             try:
                 path = Path(tmp) / "q.json"
-                path.write_text(json.dumps(QUESTIONS))
+                path.write_text(json.dumps(QUESTIONS), encoding="utf-8")
                 base_url = f"http://127.0.0.1:{server.server_port}/v1/"
                 run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "classify", "--questions", str(path),
                                       "--base-url", base_url, "--model", "jev-1.13-free"],
@@ -238,6 +238,13 @@ class CliTests(unittest.TestCase):
                 self.assertTrue(err.startswith("jev: "))
                 self.assertIn(message, err)
                 self.assertNotIn(private, err)
+
+    def test_unsupported_version_message_lists_supported_versions(self):
+        text = json.dumps({"schema_version": 3, "questions": QUESTIONS})
+        with patch("jev.SCHEMA_VERSIONS", (1, 2)):
+            code, _, err, sent = self.run_cli('{"id":1,"state":"ok"}', questions=text)
+        self.assertEqual((code, sent), (1, []))
+        self.assertIn("supported: 1, 2,", err)
 
     def test_help_as_process(self):
         result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "--help"], capture_output=True, text=True)

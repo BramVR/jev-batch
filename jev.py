@@ -77,7 +77,8 @@ def load_questions(path):
     if isinstance(document, dict) and "schema_version" in document:
         version = document["schema_version"]
         if type(version) is not int or version not in SCHEMA_VERSIONS:
-            raise JevError("unsupported questions schema_version; supported: 1, or a raw question mapping without a wrapper")
+            supported = ", ".join(map(str, SCHEMA_VERSIONS))
+            raise JevError(f"unsupported questions schema_version; supported: {supported}, or a raw question mapping without a wrapper")
         if set(document) != {"schema_version", "questions"}:
             raise JevError("versioned questions document must contain exactly schema_version and questions")
         document = document["questions"]
@@ -133,7 +134,7 @@ def classify(record, questions, key, backend, timeout):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["classify", "batch"])
-    parser.add_argument("--questions", required=True, type=Path, help="JSON questions file: raw API mapping or {schema_version: 1, questions}")
+    parser.add_argument("--questions", required=True, type=Path, help=f"JSON questions file: raw API mapping or {{schema_version: {'|'.join(map(str, SCHEMA_VERSIONS))}, questions}}")
     parser.add_argument("--base-url", default=os.environ.get("JEV_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--model", default=os.environ.get("JEV_MODEL", DEFAULT_MODEL))
     parser.add_argument("--timeout", type=float, default=60, help="per-request seconds (default 60)")
