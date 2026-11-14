@@ -38,7 +38,26 @@ Each input is an object with `id` and `state`. IDs are any JSON value and pass t
 
 Each output is `{ "id": <input id>, ...<full API response> }`. It includes `model`, `answers`, `usage`, all probabilities, confidence, and future response fields. No rounding or thresholding. Output order follows input order. Duplicate IDs remain duplicates.
 
-Requests run sequentially, with `--timeout 60` seconds per request. No automatic retries. On the first invalid record or API failure, exit 1; previous successful JSONL lines remain valid and flushed. Batch stderr identifies the failed line; it omits private HTTP bodies. Resume from that line explicitly after resolving the error. CLI argument errors exit 2. Help and successful runs exit 0.
+Requests run sequentially, with `--timeout 60` seconds per request. No automatic retries. On the first invalid record or API failure, exit 1; previous successful JSONL lines remain valid and flushed. Batch stderr identifies the failed line; it omits private HTTP bodies. Resume from that line explicitly after resolving the error, or rerun the full input with `--cache` so finished records send nothing. CLI argument errors exit 2. Help and successful runs exit 0.
+
+## Cache responses
+
+Caching is off by default. Pass `--cache DIR` to `classify` or `batch` to reuse successful responses:
+
+```sh
+python3 jev.py batch --questions questions.json --cache .private/jev-cache < records.jsonl > results.jsonl
+```
+
+A rerun with the same cache sends no request for records it already answered. After an interrupted batch, rerun the whole input with the same cache; only records without an entry send requests. Output is identical to an uncached run, with each record's current `id` attached to the stored response.
+
+- Identity. The key is SHA-256 over the format version, the full endpoint, and the exact request body: model, state, questions, and assets. A change to any of them misses. Record IDs, other record fields, credentials, and `--timeout` are not part of the key, so renamed records still hit. Question and object key order is part of the body, so reordering a mapping misses.
+- Format. `DIR/v1/<first two hex>/<sha256>.json` holds `{"version": 1, "key": <sha256>, "response": <full API response>}`. A future format bumps the version directory and ignores old entries.
+- What is stored. Only responses that pass the CLI's response validation. HTTP errors, connection failures, invalid JSON, and invalid response objects never write an entry. A corrupt, truncated, mismatched, or invalid entry counts as a miss and is overwritten after a successful request.
+- Writes. Each entry is written to a temp file in the same directory, fsynced, and renamed into place, so readers never see a partial entry. Concurrent writers for the same key each write a complete valid entry and the last rename wins. Runs do not lock or coordinate, so two concurrent runs can both send the same uncached record. If an entry cannot be written, stderr shows `jev: warning: could not write cache entry` and the result is still printed.
+- Private data. Entries hold full API responses, not states, questions, or credentials, but responses can still reveal private content. Entry files are created mode 0600 and new directories 0700. Keep the cache under an ignored path such as `.private/` and never commit it.
+- Bypass. Omit `--cache` to send every request. Delete `DIR`, or one entry file, to force a refetch. There is no expiry.
+
+`scripts/demo_sessions.py --send` uses `.private/demo/cache`, so rerunning an approved send only bills records that have not succeeded.
 
 ## Question files
 
@@ -79,7 +98,7 @@ After reviewing the saved sample and obtaining authorization to send it to the s
 python3 scripts/demo_sessions.py --send
 ```
 
-`--send` reuses the exact existing `.private/demo/sample.jsonl` without resampling or rewriting it, and pipes it to `jev.py batch` as UTF-8 whatever the locale. Missing samples fail before transmission. `--limit` must be between 1 and 20; an existing sample larger than the limit is rejected without truncation. Running without `--send` prepares and replaces the sample.
+`--send` reuses the exact existing `.private/demo/sample.jsonl` without resampling or rewriting it, and pipes it to `jev.py batch` as UTF-8 whatever the locale. It caches successful responses in `.private/demo/cache`, so a rerun sends only missing records. Cache keys cover the redacted outgoing request, so a change to the redaction policy or `--no-redact` misses earlier entries. Missing samples fail before transmission. `--limit` must be between 1 and 20; an existing sample larger than the limit is rejected without truncation. Running without `--send` prepares and replaces the sample.
 
 The script retains trailing user and assistant messages up to 24,000 characters, caps each message at 4,000 characters, and omits tools and reasoning. It writes the redacted inputs, API results, and the counts and example IDs by category beneath ignored `.private/demo/`. Do not commit those files.
 
