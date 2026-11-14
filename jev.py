@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -33,6 +34,8 @@ PRICING_DATE = "2026-11-14"
 ZEN_PRICES = "https://opencode.ai/docs/zen"
 TYPESAFE_PRICES = "https://docs.typesafe.ai/models"
 MAX_CONCURRENCY = 32
+QUESTION_TOKEN_LIMIT = 32000
+REQUEST_OVERHEAD_TOKENS = 512
 MAX_RETRIES = 10
 DEFAULT_RETRIES = 3
 BACKOFF_BASE_SECONDS = 0.5
@@ -318,18 +321,24 @@ def post(request, timeout, retries, stop):
             attempt += 1
 
 
-def respond(record_id, request, timeout, retries, stop, cache=None):
+def respond(record_id, request, timeout, retries, stop, cache=None, check=None):
     # Only validated responses are stored, after retries; a hit sends nothing and never retries.
     entry = cache.path(request.full_url, request.data) if cache else None
     result = cache.load(entry) if entry else None
-    if result is None:
-        result = post(request, timeout, retries, stop)
-        if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
-            raise JevError("System One returned an invalid response object")
-        if "id" in result:
-            raise JevError("System One response id collides with record id")
-        if cache:
-            cache.store(entry, result)
+    if result is not None:
+        if check:
+            check(result)
+        return {"id": record_id, **result}
+    result = post(request, timeout, retries, stop)
+    if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
+        raise JevError("System One returned an invalid response object")
+    if "id" in result:
+        raise JevError("System One response id collides with record id")
+    if check:
+        # A caller-level rejection must never be cached, or every rerun replays it without asking again.
+        check(result)
+    if cache:
+        cache.store(entry, result)
     return {"id": record_id, **result}
 
 
@@ -338,11 +347,112 @@ def classify(record, questions, key, backend, timeout, retries=0, stop=None, cac
     return respond(record["id"], request, timeout, retries, stop or threading.Event(), cache)
 
 
+def utf8_tokens(text):
+    # Upper bound for byte-level BPE tokenizers: every token covers at least one UTF-8 byte.
+    return len(text.encode("utf-8"))
+
+
+def chunk_capacity(questions, budget):
+    capacity = budget - REQUEST_OVERHEAD_TOKENS - utf8_tokens(json.dumps(questions, ensure_ascii=False))
+    if capacity < 4:
+        raise JevError("--chunk-tokens leaves no room for state after question overhead")
+    return capacity
+
+
+def split_text(text, capacity):
+    spans, start, size = [], 0, 0
+    for end, char in enumerate(text):
+        width = len(char.encode("utf-8"))
+        if size + width > capacity:
+            spans.append((start, end))
+            start, size = end, 0
+        size += width
+    spans.append((start, len(text)))
+    return spans
+
+
+def check_chunk_questions(questions, budget):
+    if not 0 < budget <= QUESTION_TOKEN_LIMIT:
+        raise JevError(f"--chunk-tokens must be between 1 and {QUESTION_TOKEN_LIMIT}")
+    if any(q["type"] != "choice" or not isinstance(q.get("criteria"), dict) or not q["criteria"]
+           for q in questions.values()):
+        raise JevError("--chunk-tokens supports only choice questions with criteria objects")
+    return chunk_capacity(questions, budget)
+
+
+def chunk_plan(record, questions, budget):
+    """Validate a record for chunking and return its character spans; one span means send it unchanged."""
+    if not isinstance(record, dict) or "id" not in record or "state" not in record:
+        raise JevError("record must be an object with id and state")
+    if not isinstance(record["state"], str) or "assets" in record:
+        raise JevError("--chunk-tokens supports only string state without assets")
+    return split_text(record["state"], chunk_capacity(questions, budget))
+
+
+def choice_probabilities(question, answer):
+    probabilities = answer.get("probabilities") if isinstance(answer, dict) else None
+    if not isinstance(probabilities, dict) or set(probabilities) != set(question["criteria"]) or not all(
+            isinstance(p, (int, float)) and not isinstance(p, bool) for p in probabilities.values()):
+        raise JevError("chunk answer probabilities must cover exactly the criteria labels")
+    return probabilities
+
+
+def mean_choice(question, chunk_probabilities):
+    labels = list(question["criteria"])
+    # Exact means: rounding a sum before dividing can flip the winner between near-equal labels.
+    exact = {label: sum(map(Fraction, (p[label] for p in chunk_probabilities))) / len(chunk_probabilities)
+             for label in labels}
+    # max() keeps the first maximal label, so ties go to criteria order.
+    choice = max(labels, key=exact.__getitem__)
+    total = {label: float(mean) for label, mean in exact.items()}
+    return {"type": "choice", "choice": choice, "confidence": total[choice], "probabilities": total}
+
+
+def run_chunks(record, spans, questions, key, backend, timeout, budget, retries, stop, cache=None):
+    if len(spans) == 1:
+        return respond(record["id"], prepare(record, questions, key, backend), timeout, retries, stop, cache)
+    chunks, probabilities = [], []
+    for index, (start, end) in enumerate(spans):
+        text = record["state"][start:end]
+        try:
+            request = prepare({"id": None, "state": text}, questions, key, backend)
+            result = respond(None, request, timeout, retries, stop, cache,
+                             lambda r: probabilities.append({name: choice_probabilities(q, r["answers"].get(name))
+                                                             for name, q in questions.items()}))
+        except (JevError, ValueError, UnicodeError) as exc:
+            # The record already parsed, so a ValueError here is the API response.
+            detail = str(exc) if isinstance(exc, JevError) else "System One returned invalid JSON"
+            raise JevError(f"chunk {index + 1}/{len(spans)}: {detail}") from None
+        del result["id"]
+        chunks.append({"index": index, "start": start, "end": end,
+                       "estimated_tokens": utf8_tokens(text), "response": result})
+    answers = {name: mean_choice(question, [p[name] for p in probabilities]) for name, question in questions.items()}
+    return {
+        "id": record["id"],
+        "answers": answers,
+        "aggregation": {"method": "mean", "weights": "equal", "tie_break": "criteria order",
+                        "confidence": "mean probability of chosen label"},
+        "chunking": {"token_budget": budget, "state_capacity": chunk_capacity(questions, budget),
+                     "estimator": "utf8-bytes", "overlap": 0, "count": len(chunks)},
+        "chunks": chunks,
+    }
+
+
+def estimate_chunked(record, questions, backend, budget):
+    spans = chunk_plan(record, questions, budget)
+    if len(spans) == 1:
+        return estimate(record, questions, backend)
+    rows = [estimate({"id": None, "state": record["state"][start:end]}, questions, backend) for start, end in spans]
+    return {"id": record["id"], "chunks": len(rows),
+            **{field: sum(row[field] for row in rows)
+               for field in ("request_bytes", "input_tokens_estimate", "question_tokens_estimate", "state_tokens_estimate")}}
+
+
 def emit(result):
     print(json.dumps(result, ensure_ascii=False, allow_nan=False), flush=True)
 
 
-def batch(questions, key, backend, timeout, retries, concurrency, cache=None):
+def batch(questions, key, backend, timeout, retries, concurrency, cache=None, chunk_tokens=None):
     """Keep at most `concurrency` lines in flight and emit results strictly in input order."""
     stop = threading.Event()
     window = deque()
@@ -358,12 +468,19 @@ def batch(questions, key, backend, timeout, retries, concurrency, cache=None):
                             lines = None
                             break
                         record = read_json(line)
-                        request = prepare(record, questions, key, backend)
+                        if chunk_tokens is None:
+                            request = prepare(record, questions, key, backend)
+                        else:
+                            spans = chunk_plan(record, questions, chunk_tokens)
                     except (JevError, ValueError, UnicodeError, RecursionError) as exc:
                         window.append(exc)
                         lines = None
                         break
-                    window.append(pool.submit(respond, record["id"], request, timeout, retries, stop, cache))
+                    if chunk_tokens is None:
+                        window.append(pool.submit(respond, record["id"], request, timeout, retries, stop, cache))
+                    else:
+                        window.append(pool.submit(run_chunks, record, spans, questions, key, backend, timeout,
+                                                  chunk_tokens, retries, stop, cache))
                 if not window:
                     return 0
                 pending = window.popleft()
@@ -539,6 +656,9 @@ def main(argv=None):
     parser.add_argument("--retries", type=int,
                         help=f"classify/batch: retries per request after HTTP 429 or 5xx, a connection error or timeout, or an "
                              f"'Endpoint is unavailable' error body on a status other than 401/403/422 (default {DEFAULT_RETRIES}, max {MAX_RETRIES})")
+    parser.add_argument("--chunk-tokens", type=int, metavar="N",
+                        help=f"classify/batch: split string state so each request stays within N estimated tokens "
+                             f"(max {QUESTION_TOKEN_LIMIT}); choice questions only")
     parser.add_argument("--concurrency", type=int,
                         help=f"batch: requests in flight (default 1, max {MAX_CONCURRENCY})")
     args = parser.parse_args(argv)
@@ -562,6 +682,8 @@ def main(argv=None):
             raise JevError(f"{args.command} sends no requests; --dry-run is for classify and batch")
         if offline and (args.retries is not None or args.concurrency is not None):
             raise JevError(f"{args.command} sends no requests; --retries and --concurrency are for classify and batch")
+        if offline and args.chunk_tokens is not None:
+            raise JevError(f"{args.command} sends no requests; --chunk-tokens is for classify and batch")
         if args.command == "summarize":
             return run_summarize(args)
         questions = load_questions(args.questions)
@@ -576,6 +698,8 @@ def main(argv=None):
                 report = evaluate(name, tuple(question["criteria"]), labels, sys.stdin)
             print(json.dumps(report, ensure_ascii=False, allow_nan=False))
             return 0
+        if args.chunk_tokens is not None:
+            check_chunk_questions(questions, args.chunk_tokens)
         backend = Backend(args.base_url, args.model)
         if any(q["type"] == "box" for q in questions.values()) and not backend.supports_box:
             raise JevError("Box and assets require a backend and model with image support; free Jev 1.13 is unsupported")
@@ -583,14 +707,18 @@ def main(argv=None):
         cache = Cache(args.cache) if args.cache else None
 
         if args.dry_run:
+            def estimator(record):
+                if args.chunk_tokens is None:
+                    return estimate(record, questions, backend)
+                return estimate_chunked(record, questions, backend, args.chunk_tokens)
             if args.command == "classify":
                 raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
-                emit(dry_run_report([estimate(read_json(raw), questions, backend)], backend))
+                emit(dry_run_report([estimator(read_json(raw))], backend))
                 return 0
             rows = []
             for number, line in enumerate(sys.stdin, 1):
                 try:
-                    rows.append({"line": number, **estimate(read_json(line), questions, backend)})
+                    rows.append({"line": number, **estimator(read_json(line))})
                 except (JevError, ValueError, UnicodeError, RecursionError) as exc:
                     detail = str(exc) if isinstance(exc, JevError) else "invalid JSON record"
                     print(f"jev: batch stopped at line {number}; {detail}", file=sys.stderr)
@@ -599,9 +727,15 @@ def main(argv=None):
             return 0
         retries = DEFAULT_RETRIES if args.retries is None else args.retries
         if args.command == "batch":
-            return batch(questions, key, backend, args.timeout, retries, args.concurrency or 1, cache)
+            return batch(questions, key, backend, args.timeout, retries, args.concurrency or 1, cache, args.chunk_tokens)
         raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
-        emit(classify(read_json(raw), questions, key, backend, args.timeout, retries, cache=cache))
+        record = read_json(raw)
+        if args.chunk_tokens is None:
+            emit(classify(record, questions, key, backend, args.timeout, retries, cache=cache))
+        else:
+            spans = chunk_plan(record, questions, args.chunk_tokens)
+            emit(run_chunks(record, spans, questions, key, backend, args.timeout, args.chunk_tokens,
+                            retries, threading.Event(), cache))
     except JevError as exc:
         print("jev: " + str(exc), file=sys.stderr)
         return 1
