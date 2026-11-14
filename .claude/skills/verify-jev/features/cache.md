@@ -10,6 +10,7 @@
 - `cache-resume` after a batch stops at line N, a rerun of the full input sends only lines N onward.
 - `cache-no-failure` an invalid or failed response writes no entry, so the retry sends again.
 - `cache-corrupt` a corrupt entry is refetched and rewritten, and the next run hits it.
+- `cache-dry-run` `--dry-run` with a warm cache still prices every record and sends nothing, the warm cache keeps serving afterward, and a dry run on a cold cache leaves no entry, so the next real run misses.
 - `cache-demo` `demo_sessions.py --send` caches under `.private/demo/cache`; rerunning the same send makes no request, and no entry holds a redacted fixture value.
 
 ## How to get to it (user POV)
