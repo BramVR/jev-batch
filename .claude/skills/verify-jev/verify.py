@@ -243,7 +243,7 @@ def write_fixtures(work):
                         "empty.v1.json": {"schema_version": 1, "questions": {}},
                         "broken.json": '{"billing": {"type": "noul"',
                         "record.json": {"id": {"ticket": 7}, "state": {"subject": "App crashes on save"}}}.items():
-        (work / name).write_text(value if isinstance(value, str) else json.dumps(value))
+        (work / name).write_text(value if isinstance(value, str) else json.dumps(value), encoding="utf-8")
 
 
 def execute(step, build_dir, work, stub):
@@ -294,7 +294,7 @@ def transcript(results, path):
                 out.append("stub saw:\n```json\n" + json.dumps(r["stub_requests"], indent=1, ensure_ascii=False) + "\n```\n")
             for p in r["problems"]:
                 out.append(f"- problem: {p}\n")
-    path.write_text("\n".join(out))
+    path.write_text("\n".join(out), encoding="utf-8")
 
 
 def cmd_run(args):
@@ -322,7 +322,7 @@ def cmd_run(args):
             shutil.rmtree(run_dir / "work", ignore_errors=True)
     head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
     (evidence / "results.json").write_text(json.dumps({"ref": args.ref, "head": head, "live": args.live,
-                                                       "journeys": results}, indent=1, ensure_ascii=False))
+                                                       "journeys": results}, indent=1, ensure_ascii=False), encoding="utf-8")
     transcript(results, evidence / "transcript.md")
     failed = 0
     for journey, steps in results.items():
