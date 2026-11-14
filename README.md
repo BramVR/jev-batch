@@ -202,7 +202,7 @@ git diff --check
 
 Tests mock HTTP at the CLI boundary, checking request shape/auth, complete responses, failures, retries and backoff, the concurrency bound, partial batch output, and credential selection. Eval tests check the example fixture's exact metrics through a fresh process, edge cases, and that eval sends nothing and reads no credentials. No live API credential is required for tests. Summarize tests run the CLI on synthetic result files.
 
-Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI and the session demo against a loopback System One stub, with an opt-in `--live` journey of three synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, batch invariants, question-file versioning, and demo redaction over bounded inputs, and proves each check can fail on a broken `jev.py` or demo script:
+Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI and the session demo against a loopback System One stub, with an opt-in `--live` journey of three synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, retry policy and backoff, batch order, window, and concurrency invariants, question-file versioning, and demo redaction over bounded inputs, and proves each check can fail on a broken `jev.py` or demo script:
 
 ```sh
 python3 .claude/skills/verify-jev/verify.py run
