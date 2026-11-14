@@ -30,8 +30,8 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "1131bd1990f2a7898f431a0f1f108681db2a7781",
-    "scripts/demo_sessions.py": "5a45729868d435be631d5df31262a2218e158fb8",
+    "jev.py": "09217c5cef03cf4a124c851ce648e9a8a0df07a0",
+    "scripts/demo_sessions.py": "aefdd89b19f0dc1fb55430cdf2227387b93c7bab",
 }
 KEY = "sentinel-key-not-real"
 SECRET_BODY = "SECRET-BODY-must-not-leak"
