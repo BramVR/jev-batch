@@ -31,6 +31,8 @@ Preconditions:
 
 ## Gotchas
 
+- `--cache` is a `classify`/`batch` flag. `summarize` ignores it, reading and writing no cache entry; summarize cached results by passing the JSONL that `batch --cache` printed.
+
 - All lines are parsed before any answer is checked, so an invalid JSON line is reported ahead of an earlier non-Choice answer.
 - The step-level success rule allows stderr only when the step names expected stderr; diagnostics are expected on exit 0 here.
 - That `summarize` reads no credentials is proven in `tests/test_cli.py` by patching `jev.api_key`; the stub can only show nothing was sent.
