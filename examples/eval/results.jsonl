@@ -1,0 +1,7 @@
+{"id": "t1", "model": "jev-1.13-free", "answers": {"route": {"type": "choice", "choice": "bug", "confidence": 1.0}}}
+{"id": "t2", "model": "jev-1.13-free", "answers": {"route": {"type": "choice", "choice": "feature", "confidence": 0.75}}}
+{"id": "t3", "model": "jev-1.13-free", "answers": {"route": {"type": "choice", "choice": "feature", "confidence": 0.75}}}
+{"id": "t4", "model": "jev-1.13-free", "answers": {"route": {"type": "choice", "choice": "feature", "confidence": 0.5}}}
+{"id": "t5", "model": "jev-1.13-free", "answers": {"route": {"type": "choice", "choice": "bug", "confidence": 0.9}}}
+{"id": "t6", "model": "jev-1.13-free", "answers": {"route": {"type": "choice", "choice": "question"}}}
+{"id": "t8", "model": "jev-1.13-free", "answers": {"route": {"type": "choice", "choice": "bug", "confidence": 0.6}}}

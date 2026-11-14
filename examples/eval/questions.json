@@ -1,0 +1,11 @@
+{
+  "route": {
+    "type": "choice",
+    "instructions": "Route this support ticket.",
+    "criteria": {
+      "bug": "Reports broken behavior.",
+      "feature": "Asks for new behavior.",
+      "question": "Asks how something works."
+    }
+  }
+}

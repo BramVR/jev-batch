@@ -2,6 +2,7 @@
 """Small stdlib client for Jev System One."""
 
 import argparse
+from bisect import bisect_right
 import contextlib
 from dataclasses import dataclass
 import hashlib
@@ -19,6 +20,7 @@ from urllib.parse import urlsplit
 DEFAULT_BASE_URL = "https://opencode.ai/zen/v1"
 DEFAULT_MODEL = "jev-1.13-free"
 SCHEMA_VERSIONS = (1,)
+CALIBRATION_EDGES = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 
 
 @dataclass(frozen=True)
@@ -187,22 +189,119 @@ def classify(record, questions, key, backend, timeout, cache=None):
     return {"id": record["id"], **result}
 
 
+def id_key(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
+
+
+def jsonl_records(lines, source):
+    for number, line in enumerate(lines, 1):
+        try:
+            record = read_json(line)
+        except (ValueError, RecursionError):
+            raise JevError(f"{source} line {number}: invalid JSON") from None
+        if not isinstance(record, dict) or "id" not in record:
+            raise JevError(f"{source} line {number}: expected an object with id")
+        yield number, record
+
+
+def evaluate(name, options, label_lines, prediction_lines):
+    labels = {}
+    for number, record in jsonl_records(label_lines, "labels"):
+        if record.get("label") not in options:
+            raise JevError(f"labels line {number}: label must be one of the {name} options")
+        key = id_key(record["id"])
+        if key in labels:
+            raise JevError(f"labels line {number}: duplicate id")
+        labels[key] = record["label"]
+    if not labels:
+        raise JevError("labels file has no records")
+
+    predictions = {}
+    for number, record in jsonl_records(prediction_lines, "predictions"):
+        answers = record.get("answers")
+        if not isinstance(answers, dict):
+            raise JevError(f"predictions line {number}: expected answers object")
+        if id_key(record["id"]) in predictions:
+            raise JevError(f"predictions line {number}: duplicate id")
+        predictions[id_key(record["id"])] = answers.get(name)
+
+    confusion = {truth: dict.fromkeys(options, 0) for truth in options}
+    unscored = {"missing_prediction": 0, "unknown_choice": 0}
+    bins = [[] for _ in range(len(CALIBRATION_EDGES) + 1)]
+    missing_confidence = 0
+    for key, truth in labels.items():
+        if key not in predictions:
+            unscored["missing_prediction"] += 1
+            continue
+        answer = predictions[key]
+        choice = answer.get("choice") if isinstance(answer, dict) else None
+        if not isinstance(choice, str) or choice not in options:
+            unscored["unknown_choice"] += 1
+            continue
+        confusion[truth][choice] += 1
+        confidence = answer.get("confidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+            missing_confidence += 1
+            continue
+        bins[bisect_right(CALIBRATION_EDGES, confidence)].append((confidence, choice == truth))
+
+    scored = sum(sum(row.values()) for row in confusion.values())
+    correct = sum(confusion[label][label] for label in options)
+    edges = (0.0, *CALIBRATION_EDGES, 1.0)
+    calibration = [{
+        "low": edges[i], "high": edges[i + 1], "count": len(rows),
+        "mean_confidence": math.fsum(c for c, _ in rows) / len(rows) if rows else None,
+        "accuracy": sum(ok for _, ok in rows) / len(rows) if rows else None,
+    } for i, rows in enumerate(bins)]
+    return {
+        "question": name,
+        "labels": list(options),
+        "counts": {
+            "labeled": len(labels),
+            "scored": scored,
+            "unscored": unscored,
+            "extra_predictions": len(predictions.keys() - labels.keys()),
+            "calibrated": scored - missing_confidence,
+            "missing_confidence": missing_confidence,
+        },
+        "correct": correct,
+        "accuracy": correct / scored if scored else None,
+        "confusion": confusion,
+        "calibration": calibration,
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["classify", "batch"])
+    parser.add_argument("command", choices=["classify", "batch", "eval"])
     parser.add_argument("--questions", required=True, type=Path, help=f"JSON questions file: raw API mapping or {{schema_version: {'|'.join(map(str, SCHEMA_VERSIONS))}, questions}}")
     parser.add_argument("--base-url", default=os.environ.get("JEV_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--model", default=os.environ.get("JEV_MODEL", DEFAULT_MODEL))
     parser.add_argument("--timeout", type=float, default=60, help="per-request seconds (default 60)")
     parser.add_argument("--input", type=Path, help="one {id,state} JSON record; default stdin")
     parser.add_argument("--cache", type=Path, metavar="DIR", help="reuse and store successful responses in DIR; off by default")
+    parser.add_argument("--labels", type=Path, help="eval: hand-labeled {id,label} JSONL file")
+    parser.add_argument("--question", help="eval: Choice question name; default the only question")
     args = parser.parse_args(argv)
     try:
         if not math.isfinite(args.timeout) or args.timeout <= 0:
             raise JevError("timeout must be positive and finite")
-        if args.command == "batch" and args.input:
-            raise JevError("batch reads JSONL from stdin; --input is for classify")
+        if args.command != "classify" and args.input:
+            raise JevError(f"{args.command} reads JSONL from stdin; --input is for classify")
+        if args.command != "eval" and (args.labels or args.question is not None):
+            raise JevError("--labels and --question are for eval")
         questions = load_questions(args.questions)
+        if args.command == "eval":
+            if not args.labels:
+                raise JevError("eval requires --labels")
+            name = args.question if args.question is not None else next(iter(questions)) if len(questions) == 1 else None
+            question = questions.get(name)
+            if not question or question["type"] != "choice" or not isinstance(question.get("criteria"), dict) or not question["criteria"]:
+                raise JevError("eval needs --question naming a Choice question with criteria options")
+            with args.labels.open(encoding="utf-8") as labels:
+                report = evaluate(name, tuple(question["criteria"]), labels, sys.stdin)
+            print(json.dumps(report, ensure_ascii=False, allow_nan=False))
+            return 0
         backend = Backend(args.base_url, args.model)
         if any(q["type"] == "box" for q in questions.values()) and not backend.supports_box:
             raise JevError("Box and assets require a backend and model with image support; free Jev 1.13 is unsupported")
