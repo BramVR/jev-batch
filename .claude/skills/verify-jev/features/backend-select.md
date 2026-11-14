@@ -1,6 +1,6 @@
 # Backend selection
 
-A user picks the backend with `--base-url`/`JEV_BASE_URL` and `--model`/`JEV_MODEL`. Flags beat env, which beats the OpenCode default. Box questions and image assets need an image-capable model, and TypeSafe credentials go only to TypeSafe.
+A user picks the backend with `--base-url`/`JEV_BASE_URL` and `--model`/`JEV_MODEL`. Flags beat env, which beats the OpenCode default. Box questions and image assets need an image-capable model, and TypeSafe credentials go only to TypeSafe. The same host and model pick the `--dry-run` price, and a dry run reads no key even on TypeSafe; see [Dry run](./dry-run.md).
 
 ## Sub-features
 
@@ -28,5 +28,5 @@ Preconditions:
 ## Gotchas
 
 - The stub URL is loopback HTTP, so Box support is decided by the model name alone there. On `opencode.ai` the host also forces rejection.
-- Real TypeSafe auth is not driven here; it needs a real key. Credential isolation over many URL shapes is checked in `formal-verify-jev`.
+- Real TypeSafe auth is not driven here; a send needs a real key. A TypeSafe `--dry-run` needs none and is driven in the `dry-run` journey. Credential isolation over many URL shapes is checked in `formal-verify-jev`.
 - urllib sends header names capitalized like `Typesafe-danger-zone-images`; the stub records them lowercased.

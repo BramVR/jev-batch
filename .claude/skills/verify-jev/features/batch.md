@@ -1,6 +1,6 @@
 # Batch JSONL
 
-`batch` reads JSONL from stdin, sends one request per line in order, flushes one output line per success, and stops at the first failure with the earlier lines intact.
+`batch` reads JSONL from stdin, sends one request per line in order, flushes one output line per success, and stops at the first failure with the earlier lines intact. With `--dry-run` it sends nothing, prints one report after the last line, and prints nothing when a line is invalid; see [Dry run](./dry-run.md).
 
 ## Sub-features
 

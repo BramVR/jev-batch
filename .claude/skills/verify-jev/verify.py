@@ -4,6 +4,7 @@
 import argparse
 from dataclasses import dataclass, field
 import datetime
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
@@ -142,13 +143,30 @@ def no_cache_entries(name):
     return lambda work: not any(p.is_file() for p in (work / name).rglob("*"))
 
 
+def report(out, status, cost=None, rows=None):
+    """One dry-run JSON report: labelled estimate, pricing status, totals equal the rows, cost as stated."""
+    lines = out.splitlines()
+    if len(lines) != 1:
+        return False
+    r = json.loads(lines[0])
+    records = r["records"]
+    price = r["pricing"]["input_usd_per_million_tokens"]
+    total = r["total_input_tokens_estimate"]
+    got = r["estimated_cost_usd"]
+    cost_ok = Decimal(got) == Decimal(price) * total / 1000000 if cost == "computed" else got == cost
+    return (r["dry_run"] is True and "not a tokenizer count" in r["token_method"]
+            and r["pricing"]["date"] and r["pricing"]["currency"] == "USD" and r["pricing"]["status"] == status
+            and total == sum(x["input_tokens_estimate"] for x in records)
+            and (rows is None or [(x.get("line"), x["id"]) for x in records] == rows) and cost_ok)
+
+
 def journeys(stub_url):
     base = stub_url + "/zen/v1/"
     stub_args = ["--base-url", base]
     response = json.loads(STUB_RESPONSE)
     return {
         "cli-surface": [
-            Step("help", ["--help"], stdout=lambda o: "classify" in o and "--questions" in o),
+            Step("help", ["--help"], stdout=lambda o: "classify" in o and "--questions" in o and "--dry-run" in o),
             Step("missing questions is a usage error", ["classify"], code=2, stderr="--questions"),
             Step("nonfinite timeout rejected", ["classify", "--questions", "noul.json", "--timeout", "inf"],
                  code=1, stderr="jev: timeout must be positive and finite"),
@@ -160,6 +178,8 @@ def journeys(stub_url):
                  '{"id":1,"state":"x"}', code=1, stderr="jev: questions must be a nonempty"),
             Step("unknown question type rejected", ["classify", "--questions", "weird.json"],
                  '{"id":1,"state":"x"}', code=1, stderr="jev: supported question types"),
+            Step("dry run gets the same question guard", ["classify", "--dry-run", "--questions", "empty.json"],
+                 '{"id":1,"state":"x"}', code=1, stderr="jev: questions must be a nonempty", stdout=lambda o: o == ""),
         ],
         "question-files": [
             Step("legacy mapping sends its questions", ["classify", "--questions", "noul.json", *stub_args],
@@ -347,6 +367,30 @@ def journeys(stub_url):
                  script="scripts/demo_sessions.py", env={"JEV_BASE_URL": base}, stub=[ok(DEMO_RESPONSE)], code=2,
                  stderr="--limit must be between 1 and 20", requests=lambda r: r == []),
         ],
+        "dry-run": [
+            Step("free default: zero cost, per-line rows, Unicode, no key needed",
+                 ["batch", "--dry-run", "--questions", "noul.json"],
+                 '{"id":"d-1","state":"Charged twice"}\n{"id":"d-2","state":"日本語🙂 refund"}\n',
+                 stdout=lambda o: report(o, "free", "0", [(1, "d-1"), (2, "d-2")])),
+            Step("stub backend: unknown price stays null, nothing sent, key untouched",
+                 ["classify", "--dry-run", "--questions", "choice.json", *stub_args], '{"id":"d-3","state":"x"}',
+                 env={"TYPESAFE_API_KEY": SENTINEL_KEY}, stub=[ok()],
+                 stdout=lambda o: report(o, "unknown", None, [(None, "d-3")]), requests=lambda r: r == []),
+            Step("TypeSafe jev-1.14.0 without any key: priced estimate",
+                 ["batch", "--dry-run", "--questions", "choice.json", "--base-url", "https://api.typesafe.ai/v1",
+                  "--model", "jev-1.14.0"], '{"id":"d-4","state":"one"}\n{"id":"d-5","state":["two"]}\n',
+                 stdout=lambda o: report(o, "priced", "computed", [(1, "d-4"), (2, "d-5")])),
+            Step("image assets: not estimated, cost null, nothing sent",
+                 ["classify", "--dry-run", "--questions", "box.json", "--model", "jev-1.14.0", *stub_args],
+                 json.dumps({"id": "d-6", "state": "x", "assets": ASSETS}), stub=[ok()],
+                 stdout=lambda o: report(o, "unknown", None) and json.loads(o)["records"][0]["assets_not_estimated"],
+                 requests=lambda r: r == []),
+            Step("invalid line 2 stops with no report", ["batch", "--dry-run", "--questions", "noul.json"],
+                 '{"id":1,"state":"a"}\n{not json\n', code=1,
+                 stderr="jev: batch stopped at line 2; invalid JSON record", stdout=lambda o: o == ""),
+            Step("Box on free model rejected as a send would be", ["classify", "--dry-run", "--questions", "box.json"],
+                 '{"id":1,"state":"x"}', code=1, stderr="free Jev 1.13 is unsupported", stdout=lambda o: o == ""),
+        ],
     }
 
 
@@ -367,14 +411,16 @@ def probability_map_ok(answer, labels):
             and abs(sum(values) - 1) < 0.01 and answer.get("choice") in labels)
 
 
+LIVE_BATCH = ('{"id":"verify-live-2","state":"The app crashes when I press save."}\n'
+              '{"id":"verify-live-3","state":"Please refund the duplicate charge on my card."}\n')
 LIVE = [
+    Step("dry run of the live batch: free, zero cost, sends nothing", ["batch", "--dry-run", "--questions", "choice.json"],
+         LIVE_BATCH, stdout=lambda o: report(o, "free", "0", [(1, "verify-live-2"), (2, "verify-live-3")])),
     Step("live classify noul", ["classify", "--questions", "noul.v1.json"],
          '{"id":"verify-live-1","state":"I was charged twice for my subscription this month."}',
          stdout=lambda o: lines_json(o)[0]["id"] == "verify-live-1"
          and 0 <= lines_json(o)[0]["answers"]["billing"]["noul"] <= 1, timeout=90),
-    Step("live batch choice", ["batch", "--questions", "choice.json"],
-         '{"id":"verify-live-2","state":"The app crashes when I press save."}\n'
-         '{"id":"verify-live-3","state":"Please refund the duplicate charge on my card."}\n',
+    Step("live batch choice", ["batch", "--questions", "choice.json"], LIVE_BATCH,
          stdout=lambda o: [x["id"] for x in lines_json(o)] == ["verify-live-2", "verify-live-3"]
          and all(probability_map_ok(x["answers"]["topic"], CHOICE["topic"]["criteria"]) for x in lines_json(o)),
          timeout=180),
