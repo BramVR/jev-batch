@@ -414,6 +414,7 @@ def journeys(stub_url):
             Step("send keeps sample, stub sees no fixture value", ["--send"], script="scripts/demo_sessions.py",
                  env={"JEV_BASE_URL": base}, stub=[ok(DEMO_RESPONSE)],
                  stdout=lambda o: clean(o) and json.loads(o)["classification_counts"]["fine"] == 1
+                 and len(json.loads(o)["classification_counts"]) == 4 and json.loads(o)["confidence"]["missing"] == 1
                  and json.loads(o)["redaction"]["counts"] == {},
                  requests=lambda r: len(r) == 1 and clean(json.dumps(r[0]["body"]))
                  and "[REDACTED:home]" in json.dumps(r[0]["body"]),
