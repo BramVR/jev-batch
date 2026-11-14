@@ -4,12 +4,12 @@ The default backend, free OpenCode `jev-1.13-free` at `https://opencode.ai/zen/v
 
 ## Sub-features
 
-- `live-noul` one classify returns `answers.billing.noul` in [0, 1] with the ID preserved.
+- `live-noul` one classify with the version-1 file `noul.v1.json` returns `answers.billing.noul` in [0, 1] with the ID preserved.
 - `live-choice-batch` a two-line batch returns IDs in order and a full probability map over exactly the criteria labels, summing to 1 within 0.01.
 
 ## How to get to it (user POV)
 
-- `python3 jev.py classify --questions noul.json` with no base URL flag or env.
+- `python3 jev.py classify --questions noul.v1.json` with no base URL flag or env.
 
 ## Driving it with verify.py
 

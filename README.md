@@ -8,13 +8,18 @@ Use `--base-url` or `JEV_BASE_URL` to select the API base URL and `--model` or `
 
 For TypeSafe, select `--base-url https://api.typesafe.ai/v1 --model jev-1.14.0`. Set `TYPESAFE_API_KEY`, or store a generic password under macOS Keychain service `typesafe`. The environment key takes precedence. Only the exact HTTPS TypeSafe origin reads these credentials. Other origins receive no TypeSafe key and no Authorization header. The CLI never reads credential files or accepts a key argument.
 
-Write a raw API question mapping to `questions.json`:
+Write a version-1 question document to `questions.json`:
 
 ```json
 {
-  "billing": {"type": "noul", "instructions": "Is this message about billing?"}
+  "schema_version": 1,
+  "questions": {
+    "billing": {"type": "noul", "instructions": "Is this message about billing?"}
+  }
 }
 ```
+
+A raw API question mapping without the wrapper still works. See [Question files](#question-files).
 
 Classify one JSON record from stdin or `--input record.json`:
 
@@ -35,9 +40,22 @@ Each output is `{ "id": <input id>, ...<full API response> }`. It includes `mode
 
 Requests run sequentially, with `--timeout 60` seconds per request. No automatic retries. On the first invalid record or API failure, exit 1; previous successful JSONL lines remain valid and flushed. Batch stderr identifies the failed line; it omits private HTTP bodies. Resume from that line explicitly after resolving the error. CLI argument errors exit 2. Help and successful runs exit 0.
 
+## Question files
+
+`--questions` reads one UTF-8 JSON file in either form:
+
+- Version 1 document. An object with exactly two keys. `schema_version` is the integer `1`. `questions` is the API question mapping.
+- Legacy raw mapping. The API question mapping itself, as in [examples/failure-patterns.json](examples/failure-patterns.json).
+
+A top-level `schema_version` key marks a versioned document, so it cannot name a legacy question. [examples/failure-patterns.v1.json](examples/failure-patterns.v1.json) is the versioned equivalent of the legacy example. Both send identical requests.
+
+Before any HTTP request, the CLI exits 1 on unreadable or invalid JSON, nonfinite numbers, an unknown or non-integer `schema_version`, missing or extra wrapper keys, an empty or non-object mapping, or an unsupported question type. Errors name the rule that failed and never echo file contents.
+
+Only the `questions` mapping is sent. `schema_version` describes the file format. It is never sent and is not part of a question set's identity. Wrapping a legacy file in version 1 changes nothing the API sees, and any change to question content changes every request. jev-cli keeps no response cache. A cache built on its output must key on the unwrapped mapping, model, and record, never on the file path or `schema_version` alone.
+
 ## Question contracts
 
-The file passed to `--questions` is the questions mapping itself, without a `questions` wrapper. Text question objects pass through to the API, which validates their detailed schema:
+Question objects in the mapping pass through to the API, which validates their detailed schema:
 
 - `choice` uses `criteria` as an object mapping option names to descriptions. Answers include `choice`, `confidence`, and the complete `probabilities` map.
 - `score` uses `criteria` as an ordered array of level descriptions, indexed from zero. Answers include `score`, `legend`, `confidence`, and `probabilities`.

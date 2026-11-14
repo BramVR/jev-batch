@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Accept version-1 question documents (`schema_version` plus `questions`) alongside legacy raw mappings, and reject unknown versions, empty mappings, and malformed question files before any request with non-private errors.
+
 - Reuse the approved private session sample for demo sends, cap samples at 20, and report category counts and example IDs; verify eight real OpenCode classifications without committing excerpts.
 
 - Default to free OpenCode Jev 1.13 with configurable base URL and model, isolate TypeSafe credentials to its HTTPS origin, and reject unsupported Box requests locally.

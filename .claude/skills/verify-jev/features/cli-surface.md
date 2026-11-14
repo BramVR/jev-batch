@@ -8,7 +8,7 @@ A user gets help, clear usage errors, and local rejection of bad flags or questi
 - `usage-error` missing `--questions` exits 2 from argparse.
 - `timeout-guard` nonfinite or nonpositive `--timeout` exits 1.
 - `batch-input-guard` `batch --input` exits 1; batch reads stdin only.
-- `questions-guard` empty mapping or unknown question type exits 1.
+- `questions-guard` empty mapping or unknown question type exits 1. Version and wrapper rules live in [question-files](./question-files.md).
 
 ## How to get to it (user POV)
 

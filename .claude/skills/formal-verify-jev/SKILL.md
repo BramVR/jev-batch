@@ -1,6 +1,6 @@
 ---
 name: formal-verify-jev
-description: "Exhaustively check jev.py contracts over bounded input spaces: System One request shape and credential isolation, exact probability passthrough, JSONL batch prefix and flush invariants. Use when changing jev.py classify/main/Backend/read_json/api_key, or before trusting a change to request, number, or batch handling."
+description: "Exhaustively check jev.py contracts over bounded input spaces: System One request shape and credential isolation, exact probability passthrough, JSONL batch prefix and flush invariants, question-file versioning. Use when changing jev.py classify/main/Backend/read_json/api_key/load_questions, or before trusting a change to request, number, batch, or question-file handling."
 ---
 
 # Formal verification of jev.py contracts
@@ -13,7 +13,8 @@ Tool choice. Python has no practical code-level verifier for this program: Cross
 
 ```sh
 python3 .claude/skills/formal-verify-jev/check.py              # all properties, batch depth 3, ~4s
-python3 .claude/skills/formal-verify-jev/check.py --mutants    # also prove each property can fail, ~30s
+python3 .claude/skills/formal-verify-jev/check.py --mutants    # also prove each property can fail, ~40s
+python3 .claude/skills/formal-verify-jev/check.py --only questions   # question-file versioning only, <1s
 python3 .claude/skills/formal-verify-jev/check.py --depth 4 --only batch   # deeper batch, ~20s
 python3 .claude/skills/formal-verify-jev/check.py --stale      # covered files changed since SYNC_COMMIT?
 ```
@@ -22,7 +23,7 @@ Exit 0 and `PASS` means no new violations, every known finding still reproduces,
 
 ## Does my change touch this?
 
-Covered file: `jev.py`, all of `Backend`, `api_key`, `read_json`, `classify`, `main`. Sync commit: `SYNC_COMMIT` in `check.py`. Run `--stale`. Any diff in `jev.py` since then means run the full check with `--mutants`.
+Covered file: `jev.py`, all of `Backend`, `api_key`, `read_json`, `load_questions`, `classify`, `main`. Sync commit: `SYNC_COMMIT` in `check.py`. Run `--stale`. Any diff in `jev.py` since then means run the full check with `--mutants`.
 
 ## Properties
 
@@ -38,11 +39,14 @@ Each property is one sentence of promise and one of harm.
 - `request-body`, `request-endpoint`, `request-method`, `request-timeout`, `request-content-type`, `request-user-agent`. The single POST goes to `base.rstrip("/") + "/systemone"` with body exactly `{model, state, questions}` plus `assets` when the record has them, and extra record fields are never sent. Otherwise private fields leak or the API rejects the call.
 - `images-header-iff-images` and `box-rejected-locally-on-free`. `TypeSafe-Danger-Zone-Images: true` is sent exactly when there are assets or a Box question, and free OpenCode or Jev 1.13 rejects them before any request. Otherwise image data reaches a text-only backend.
 - `numbers-passthrough-exact`. Every finite number in the response, including `5e-324`, `0.30000000000000004`, `-0.0`, `2**64`, comes out with the same type and float bits, and keys keep their order. `numbers-nonfinite-rejected`: `NaN`, `Infinity`, and overflowing literals like `1e999` anywhere in a response mean exit 1 and no stdout. Otherwise downstream code reads altered probabilities or invalid JSON.
+- `questions-accept-iff-valid`. A question file is accepted exactly when it is a nonempty mapping of supported question types, bare or inside `{"schema_version": 1, "questions": ...}` with no other keys, where the version is the integer `1` (not `True`, `1.0`, or `"1"`). Otherwise unknown versions run as if supported, or valid legacy files break.
+- `questions-unwrap-exact`. An accepted file sends exactly one request whose body keys are `model`, `state`, `questions`, and whose `questions` equals the unwrapped mapping, key order included. Otherwise wrapper metadata reaches the API or the two forms diverge.
+- `questions-reject-before-network`, `questions-reject-message`, `questions-reject-no-echo`. A rejected file exits 1 with no request, one `jev: ` line that is not the generic read error, and none of the file's content. Otherwise bad files cost a request, users get no actionable error, or private question text reaches logs.
 - `*-clean-exit`. No input in scope escapes `main` as an uncaught exception.
 
-Domain and bounds, all in `check.py`: `LINE_KINDS` (17 line outcomes) at every sequence length up to `--depth`; `BASE_URLS` x `MODELS` x `QUESTION_SETS` x `RECORDS` x key present or absent; `FINITE` + `NONFINITE` in three response slots for both commands. The fake `urlopen` builds an `http.client.HTTPConnection` from the request host, so urllib's host validation runs as in production.
+Domain and bounds, all in `check.py`: `LINE_KINDS` (17 line outcomes) at every sequence length up to `--depth`; `BASE_URLS` x `MODELS` x `QUESTION_SETS` x `RECORDS` x key present or absent; `FINITE` + `NONFINITE` in three response slots for both commands; `question_documents()` (`MAPPINGS` bare and wrapped, reordered, or with an extra key under every `VERSIONS` value, plus missing-key wrappers and `RAW_FILES` such as invalid JSON, non-UTF-8, nonfinite numbers, and 100k-deep nesting) for both commands. The fake `urlopen` builds an `http.client.HTTPConnection` from the request host, so urllib's host validation runs as in production.
 
-Not covered: real sockets and TLS, `api_key`'s Keychain path (mocked as absent), argparse beyond what the cases hit, huge inputs, and live API behavior. `verify-jev` drives the real process and network path.
+Not covered: question files bigger than the listed shapes, real sockets and TLS, `api_key`'s Keychain path (mocked as absent), argparse beyond what the cases hit, huge inputs, and live API behavior. `verify-jev` drives the real process and network path.
 
 ## Reading results
 

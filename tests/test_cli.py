@@ -26,7 +26,7 @@ RESPONSE = {
 
 
 class CliTests(unittest.TestCase):
-    def run_cli(self, data, command="batch", response=RESPONSE, extra=(), env=None):
+    def run_cli(self, data, command="batch", response=RESPONSE, extra=(), env=None, questions=QUESTIONS):
         sent = []
 
         def http(request, timeout):
@@ -36,14 +36,14 @@ class CliTests(unittest.TestCase):
             return contextlib.closing(io.BytesIO(json.dumps(response).encode()))
 
         with tempfile.TemporaryDirectory() as tmp:
-            questions = Path(tmp) / "q.json"
-            questions.write_text(json.dumps(QUESTIONS))
+            path = Path(tmp) / "q.json"
+            path.write_text(questions if isinstance(questions, str) else json.dumps(questions), encoding="utf-8")
             out, err = io.StringIO(), io.StringIO()
             with patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-only", **(env or {})}, clear=True), \
                  patch("sys.stdin", io.StringIO(data)), \
                  patch("urllib.request.urlopen", side_effect=http), \
                  contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = jev.main([command, "--questions", str(questions), *extra])
+                code = jev.main([command, "--questions", str(path), *extra])
             return code, out.getvalue(), err.getvalue(), sent
 
     def test_batch_preserves_ids_probabilities_metadata_and_request(self):
@@ -181,7 +181,7 @@ class CliTests(unittest.TestCase):
             worker.start()
             try:
                 path = Path(tmp) / "q.json"
-                path.write_text(json.dumps(QUESTIONS))
+                path.write_text(json.dumps(QUESTIONS), encoding="utf-8")
                 base_url = f"http://127.0.0.1:{server.server_port}/v1/"
                 run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "classify", "--questions", str(path),
                                       "--base-url", base_url, "--model", "jev-1.13-free"],
@@ -200,6 +200,51 @@ class CliTests(unittest.TestCase):
             code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}')
         self.assertEqual((code, out, sent), (1, "", []))
         self.assertIn("supported question types", err)
+
+    def test_versioned_example_sends_same_questions_as_legacy(self):
+        legacy = json.loads((ROOT / "examples/failure-patterns.json").read_text())
+        versioned = json.loads((ROOT / "examples/failure-patterns.v1.json").read_text())
+        self.assertEqual(versioned, {"schema_version": 1, "questions": legacy})
+        bodies = []
+        for name in ("failure-patterns.json", "failure-patterns.v1.json"):
+            code, _, err, sent = self.run_cli('{"id":1,"state":"ok"}',
+                                              questions=(ROOT / "examples" / name).read_text())
+            self.assertEqual((code, err), (0, ""))
+            bodies.append(json.loads(sent[0][0].data))
+        self.assertEqual(bodies[0], bodies[1])
+        self.assertEqual(bodies[0]["questions"], legacy)
+
+    def test_bad_question_documents_fail_before_http(self):
+        private = "PRIVATE-question-text"
+        question = {"type": "noul", "instructions": private}
+        cases = {
+            json.dumps({"schema_version": 2, "questions": {"q": question}}): "unsupported questions schema_version",
+            json.dumps({"schema_version": "1", "questions": {"q": question}}): "unsupported questions schema_version",
+            json.dumps({"schema_version": True, "questions": {"q": question}}): "unsupported questions schema_version",
+            json.dumps({"schema_version": 1}): "exactly schema_version and questions",
+            json.dumps({"schema_version": 1, "questions": {"q": question}, "note": private}): "exactly schema_version and questions",
+            json.dumps({"schema_version": 1, "questions": {}}): "nonempty API question mapping",
+            json.dumps({"schema_version": 1, "questions": [question]}): "nonempty API question mapping",
+            json.dumps({"schema_version": 1, "questions": {"q": {"type": "x", "note": private}}}): "supported question types",
+            "{}": "nonempty API question mapping",
+            "[]": "nonempty API question mapping",
+            '{"q": ' + json.dumps(question)[:-1]: "readable UTF-8 JSON",
+            '{"q": {"type": "noul", "instructions": 1e999}}': "readable UTF-8 JSON",
+        }
+        for text, message in cases.items():
+            with self.subTest(text=text):
+                code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}', questions=text)
+                self.assertEqual((code, out, sent), (1, "", []))
+                self.assertTrue(err.startswith("jev: "))
+                self.assertIn(message, err)
+                self.assertNotIn(private, err)
+
+    def test_unsupported_version_message_lists_supported_versions(self):
+        text = json.dumps({"schema_version": 3, "questions": QUESTIONS})
+        with patch("jev.SCHEMA_VERSIONS", (1, 2)):
+            code, _, err, sent = self.run_cli('{"id":1,"state":"ok"}', questions=text)
+        self.assertEqual((code, sent), (1, []))
+        self.assertIn("supported: 1, 2,", err)
 
     def test_help_as_process(self):
         result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "--help"], capture_output=True, text=True)
