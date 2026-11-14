@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      # check.py --stale diffs against an older sync commit, so it needs full history.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: tests
+        run: python3 -m unittest discover -s tests -v
+      - name: verify-jev offline journeys
+        run: python3 .claude/skills/verify-jev/verify.py run
+      # check.py returns early on --stale, so --mutants and --stale run as separate steps.
+      - name: formal-verify-jev mutants
+        run: python3 .claude/skills/formal-verify-jev/check.py --mutants
+      - name: formal-verify-jev stale
+        run: python3 .claude/skills/formal-verify-jev/check.py --stale
