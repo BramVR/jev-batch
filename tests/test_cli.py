@@ -26,7 +26,7 @@ RESPONSE = {
 
 
 class CliTests(unittest.TestCase):
-    def run_cli(self, data, command="batch", response=RESPONSE, extra=()):
+    def run_cli(self, data, command="batch", response=RESPONSE, extra=(), env=None):
         sent = []
 
         def http(request, timeout):
@@ -39,7 +39,7 @@ class CliTests(unittest.TestCase):
             questions = Path(tmp) / "q.json"
             questions.write_text(json.dumps(QUESTIONS))
             out, err = io.StringIO(), io.StringIO()
-            with patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-only"}), \
+            with patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-only", **(env or {})}, clear=True), \
                  patch("sys.stdin", io.StringIO(data)), \
                  patch("urllib.request.urlopen", side_effect=http), \
                  contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -54,12 +54,64 @@ class CliTests(unittest.TestCase):
         self.assertEqual([json.loads(x) for x in out.splitlines()],
                          [{"id": r["id"], **RESPONSE} for r in records])
         for (req, timeout), record in zip(sent, records):
-            self.assertEqual(req.full_url, "https://api.typesafe.ai/v1/systemone")
+            self.assertEqual(req.full_url, "https://opencode.ai/zen/v1/systemone")
             self.assertEqual(req.get_method(), "POST")
-            self.assertEqual(req.get_header("Authorization"), "Bearer test-only")
+            self.assertIsNone(req.get_header("Authorization"))
             self.assertEqual(req.get_header("Content-type"), "application/json")
-            self.assertEqual(json.loads(req.data), {"model": "jev-1.14.0", "state": record["state"], "questions": QUESTIONS})
+            self.assertEqual(json.loads(req.data), {"model": "jev-1.13-free", "state": record["state"], "questions": QUESTIONS})
             self.assertEqual(timeout, 60)
+
+    def test_default_never_reads_typesafe_credentials(self):
+        with patch("jev.api_key") as key, patch("subprocess.run") as keychain:
+            code, _, err, sent = self.run_cli('{"id":1,"state":"ok"}')
+        self.assertEqual((code, err), (0, ""))
+        self.assertIsNone(sent[0][0].get_header("Authorization"))
+        key.assert_not_called()
+        keychain.assert_not_called()
+
+    def test_env_and_flag_precedence(self):
+        env = {"JEV_BASE_URL": "http://localhost:1234/custom/", "JEV_MODEL": "env-model"}
+        for extra, url, model in (
+            ([], "http://localhost:1234/custom/systemone", "env-model"),
+            (["--base-url", "https://opencode.ai/zen/v1", "--model", "flag-model"],
+             "https://opencode.ai/zen/v1/systemone", "flag-model"),
+        ):
+            code, _, err, sent = self.run_cli('{"id":1,"state":"ok"}', extra=extra, env=env)
+            self.assertEqual((code, err), (0, ""))
+            request = sent[0][0]
+            self.assertEqual(request.full_url, url)
+            self.assertEqual(json.loads(request.data)["model"], model)
+            self.assertIsNone(request.get_header("Authorization"))
+
+    def test_typesafe_credentials_on_selected_origin_only(self):
+        for url in ("https://api.typesafe.ai/v1", "https://api.typesafe.ai.evil.example/v1",
+                    "http://api.typesafe.ai/v1", "https://opencode.ai/zen/v1"):
+            code, _, err, sent = self.run_cli('{"id":1,"state":"ok"}', extra=["--base-url", url])
+            self.assertEqual((code, err), (0, ""))
+            expected = "Bearer test-only" if url == "https://api.typesafe.ai/v1" else None
+            self.assertEqual(sent[0][0].get_header("Authorization"), expected)
+        with patch("sys.platform", "darwin"), patch("subprocess.run", return_value=
+                subprocess.CompletedProcess([], 0, "keychain-key\n")) as keychain:
+            code, _, err, sent = self.run_cli('{"id":1,"state":"ok"}',
+                extra=["--base-url", "https://api.typesafe.ai/v1"], env={"TYPESAFE_API_KEY": ""})
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(sent[0][0].get_header("Authorization"), "Bearer keychain-key")
+        self.assertEqual(keychain.call_count, 1)
+
+    def test_box_and_assets_backend_support(self):
+        for extra in ([], ["--base-url", "https://api.typesafe.ai/v1", "--model", "jev-1.13.0"]):
+            with patch.dict(QUESTIONS["route"], {"type": "box"}):
+                code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}', extra=extra)
+            self.assertEqual((code, out, sent), (1, "", []))
+            self.assertIn("free Jev 1.13 is unsupported", err)
+        record = '{"id":1,"state":"ok","assets":{}}'
+        self.assertEqual(self.run_cli(record)[0], 1)
+        with patch.dict(QUESTIONS["route"], {"type": "box"}):
+            code, _, err, sent = self.run_cli(record,
+                extra=["--base-url", "https://api.typesafe.ai/v1", "--model", "jev-1.14.0"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(sent[0][0].get_header("Typesafe-danger-zone-images"), "true")
+        self.assertEqual(json.loads(sent[0][0].data)["assets"], {})
 
     def test_single(self):
         code, out, err, sent = self.run_cli('{"id":null,"state":"text"}', "classify")
@@ -76,7 +128,7 @@ class CliTests(unittest.TestCase):
 
     def test_http_errors_do_not_echo_private_body_or_retry(self):
         for status in (401, 422, 429, 529):
-            error = urllib.error.HTTPError(jev.ENDPOINT, status, "private", {}, io.BytesIO(b"secret"))
+            error = urllib.error.HTTPError(jev.DEFAULT_BASE_URL + "/systemone", status, "private", {}, io.BytesIO(b"secret"))
             code, out, err, sent = self.run_cli('{"id":1,"state":"private"}', "classify", error)
             self.assertEqual((code, out), (1, ""))
             self.assertIn(str(status), err)
@@ -129,15 +181,15 @@ class CliTests(unittest.TestCase):
             try:
                 path = Path(tmp) / "q.json"
                 path.write_text(json.dumps(QUESTIONS))
-                endpoint = f"http://127.0.0.1:{server.server_port}/v1/systemone"
-                bootstrap = f"import jev; jev.ENDPOINT={endpoint!r}; raise SystemExit(jev.main())"
-                run = subprocess.run([sys.executable, "-c", bootstrap, "classify", "--questions", str(path)],
-                                     cwd=ROOT, env={**os.environ, "TYPESAFE_API_KEY": "test-only"},
+                base_url = f"http://127.0.0.1:{server.server_port}/v1/"
+                run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "classify", "--questions", str(path),
+                                      "--base-url", base_url, "--model", "jev-1.13-free"],
+                                     cwd=ROOT, env={"PATH": os.environ["PATH"], "TYPESAFE_API_KEY": "test-only"},
                                      input='{"id":"process","state":"hello"}', capture_output=True, text=True, timeout=10)
                 self.assertEqual((run.returncode, run.stderr), (0, ""))
                 self.assertEqual(json.loads(run.stdout), {"id": "process", **RESPONSE})
-                self.assertEqual(received, [("/v1/systemone", "Bearer test-only",
-                                            {"model": "jev-1.14.0", "state": "hello", "questions": QUESTIONS})])
+                self.assertEqual(received, [("/v1/systemone", None,
+                                            {"model": "jev-1.13-free", "state": "hello", "questions": QUESTIONS})])
             finally:
                 server.shutdown()
                 worker.join()

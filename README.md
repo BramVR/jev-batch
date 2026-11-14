@@ -1,10 +1,12 @@
 # jev-cli
 
-Python 3.9+ stdlib CLI for TypeSafe's `POST https://api.typesafe.ai/v1/systemone`. No installation or dependencies. Default model `jev-1.14.0` is pinned for repeatable model selection; `--model jev-latest` follows releases.
+Python 3.9+ stdlib CLI for Jev System One. No installation or dependencies. Defaults to free OpenCode `POST https://opencode.ai/zen/v1/systemone`, model `jev-1.13-free`, without authentication.
 
 ## Classify records
 
-Set `TYPESAFE_API_KEY` in your environment, or store a generic password under macOS Keychain service `typesafe`. The environment takes precedence. The CLI never reads credential files or accepts a key argument.
+Use `--base-url` or `JEV_BASE_URL` to select the API base URL and `--model` or `JEV_MODEL` to select the model. Flags override environment values, which override defaults. The CLI appends `/systemone` after removing trailing slashes.
+
+For TypeSafe, select `--base-url https://api.typesafe.ai/v1 --model jev-1.14.0`. Set `TYPESAFE_API_KEY`, or store a generic password under macOS Keychain service `typesafe`. The environment key takes precedence. Only the exact HTTPS TypeSafe origin reads these credentials. Other origins receive no TypeSafe key and no Authorization header. The CLI never reads credential files or accepts a key argument.
 
 Write a raw API question mapping to `questions.json`:
 
@@ -41,7 +43,7 @@ The file passed to `--questions` is the questions mapping itself, without a `que
 - `score` uses `criteria` as an ordered array of level descriptions, indexed from zero. Answers include `score`, `legend`, `confidence`, and `probabilities`.
 - `noul` asks a yes/no question through `instructions`, with optional `criteria.true` and `criteria.false`. Answers contain `noul`, the probability of yes.
 
-Instructions and descriptions can be strings, objects, or arrays where documented. Box questions pass through with optional record `assets` containing image `type`, `format`, and `data_base64`. The CLI automatically sends `TypeSafe-Danger-Zone-Images: true` for assets or Box questions. Box answers retain coordinates and confidence. Multipart, long-context headers, retry policies, concurrency, and packaging are outside this version.
+Instructions and descriptions can be strings, objects, or arrays where documented. Free OpenCode and Jev 1.13 reject Box questions and image assets locally. With a supporting backend and model, Box questions pass through with optional record `assets` containing image `type`, `format`, and `data_base64`. The CLI automatically sends `TypeSafe-Danger-Zone-Images: true` for assets or Box questions. Box answers retain coordinates and confidence. Multipart, long-context headers, retry policies, concurrency, and packaging are outside this version.
 
 Contracts checked 2026-11-14 against [models](https://docs.typesafe.ai/models), [System One](https://docs.typesafe.ai/api/system-one), [Choice](https://docs.typesafe.ai/primitives/choice), [Score](https://docs.typesafe.ai/primitives/score), [Noul](https://docs.typesafe.ai/primitives/noul), [Box](https://docs.typesafe.ai/primitives/box), and [OpenAPI](https://api.typesafe.ai/openapi.json). Jev's documented default limits are 64k tokens per request and 32k per question. Keep transcripts bounded.
 
