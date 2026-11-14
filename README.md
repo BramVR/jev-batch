@@ -57,6 +57,26 @@ A rerun with the same cache sends no request for records it already answered. Af
 - Private data. Entries hold full API responses, not states, questions, or credentials, but responses can still reveal private content. Entry files are created owner-only (mode 0600). Keep the cache under an ignored path such as `.private/` and never commit it.
 - Bypass. Omit `--cache` to send every request. Delete `DIR`, or one entry file, to force a refetch. There is no expiry.
 
+### Dry run
+
+Price a run before sending it. `--dry-run` works with `classify` and `batch`. It validates questions, backend, and every record exactly as a real run does, then prints one JSON report to stdout. It sends no request and reads no TypeSafe key or Keychain entry:
+
+```sh
+python3 jev.py batch --dry-run --questions questions.json \
+  --base-url https://api.typesafe.ai/v1 --model jev-1.14.0 < records.jsonl
+```
+
+The report names the backend endpoint and model and lists each record's `id` with estimated input, question, and state tokens. Batch rows also carry the input `line`. It totals the input estimates and gives `estimated_cost_usd` as a decimal string. A batch with an invalid line exits 1 with the usual `batch stopped at line N` error and prints no report.
+
+Token counts are estimates, not tokenizer counts. The rule is `ceil(ASCII chars / 4) + 1 per non-ASCII code point` over the JSON request body the CLI would send, with non-ASCII characters left unescaped. The body includes the model, state, questions, and JSON syntax. The rule is deterministic and conservative for CJK and emoji. Real tokenizers can count differently.
+
+Prices were read 2026-11-14 as input USD per million tokens. The source pages show `$` without a currency code, so USD is assumed:
+
+- OpenCode Zen ([docs](https://opencode.ai/docs/zen)) lists `jev-1.13-free` at 0 and `jev-1.13` at 0.042.
+- TypeSafe ([models](https://docs.typesafe.ai/models)) lists `jev-1.14.0`, `jev-1.13.0`, `jev-latest`, and `jev-preview` at 0.042, for the HTTPS origin only.
+
+Output tokens are not estimated. Both sources list them as free. Any other host or model reports price status `unknown` and a `null` price and cost, never a guess. Image `assets` are excluded from token estimates. Such records are flagged `assets_not_estimated`, and the run's cost is `null`.
+
 ## Question files
 
 `--questions` reads one UTF-8 JSON file in either form:

@@ -5,6 +5,7 @@ import argparse
 from bisect import bisect_right
 import contextlib
 from dataclasses import dataclass
+from decimal import Decimal
 import hashlib
 import json
 import math
@@ -21,6 +22,18 @@ DEFAULT_BASE_URL = "https://opencode.ai/zen/v1"
 DEFAULT_MODEL = "jev-1.13-free"
 SCHEMA_VERSIONS = (1,)
 CALIBRATION_EDGES = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+PRICING_DATE = "2026-11-14"
+ZEN_PRICES = "https://opencode.ai/docs/zen"
+TYPESAFE_PRICES = "https://docs.typesafe.ai/models"
+# (hostname, model) -> (input USD per million tokens, source). Both sources list output tokens as free.
+PRICES = {
+    ("opencode.ai", "jev-1.13-free"): ("0", ZEN_PRICES),
+    ("opencode.ai", "jev-1.13"): ("0.042", ZEN_PRICES),
+    **{("api.typesafe.ai", model): ("0.042", TYPESAFE_PRICES)
+       for model in ("jev-1.14.0", "jev-1.13.0", "jev-latest", "jev-preview")},
+}
+TOKEN_METHOD = ("heuristic: ceil(ASCII chars / 4) + 1 per non-ASCII code point over the JSON request body "
+                "without assets; not a tokenizer count")
 
 
 @dataclass(frozen=True)
@@ -47,6 +60,13 @@ class Backend:
     @property
     def supports_box(self):
         return not (urlsplit(self.base_url).hostname == "opencode.ai" or "1.13" in self.model or self.model.endswith("-free"))
+
+    @property
+    def price(self):
+        host = urlsplit(self.base_url).hostname
+        if host == "api.typesafe.ai" and not self.typesafe:
+            return None
+        return PRICES.get((host, self.model))
 
 
 class JevError(Exception):
@@ -142,7 +162,11 @@ def valid_response(result):
     return isinstance(result, dict) and isinstance(result.get("answers"), dict) and "id" not in result
 
 
-def classify(record, questions, key, backend, timeout, cache=None):
+def uses_images(payload):
+    return "assets" in payload or any(q["type"] == "box" for q in payload["questions"].values())
+
+
+def request_payload(record, questions, backend):
     if not isinstance(record, dict) or "id" not in record or "state" not in record:
         raise JevError("record must be an object with id and state")
     if not isinstance(record["state"], (str, dict, list)):
@@ -152,12 +176,64 @@ def classify(record, questions, key, backend, timeout, cache=None):
         if not isinstance(record["assets"], dict):
             raise JevError("assets must be an object")
         payload["assets"] = record["assets"]
+    if uses_images(payload) and not backend.supports_box:
+        raise JevError("Box and assets require a backend and model with image support; free Jev 1.13 is unsupported")
+    return payload
+
+
+def estimate_tokens(value):
+    text = json.dumps(value, ensure_ascii=False, allow_nan=False)
+    ascii_chars = sum(char < "\x80" for char in text)
+    return (ascii_chars + 3) // 4 + len(text) - ascii_chars
+
+
+def estimate(record, questions, backend):
+    payload = request_payload(record, questions, backend)
+    text = {key: value for key, value in payload.items() if key != "assets"}
+    row = {"id": record["id"], "input_tokens_estimate": estimate_tokens(text),
+           "question_tokens_estimate": estimate_tokens(questions),
+           "state_tokens_estimate": estimate_tokens(record["state"])}
+    if "assets" in payload:
+        row["assets_not_estimated"] = True
+    return row
+
+
+def dry_run_report(rows, backend):
+    price, source = backend.price or (None, None)
+    total = sum(row["input_tokens_estimate"] for row in rows)
+    cost = None
+    if price is not None and not any(row.get("assets_not_estimated") for row in rows):
+        cost = format((Decimal(price) * total / 1000000).normalize(), "f")
+    if price is None:
+        status, basis = "unknown", "No listed price for this backend host and model; cost is unknown, not zero."
+    else:
+        status = "free" if Decimal(price) == 0 else "priced"
+        basis = f"Input price read from source on {PRICING_DATE}; the page shows \"$\" without a currency code, so USD is assumed."
+    return {
+        "dry_run": True,
+        "estimate": "Estimated input tokens and cost; nothing was sent and no credentials were read.",
+        "backend": {"endpoint": backend.endpoint, "model": backend.model},
+        "token_method": TOKEN_METHOD,
+        "pricing": {
+            "date": PRICING_DATE, "currency": "USD", "status": status,
+            "input_usd_per_million_tokens": price,
+            "output_usd_per_million_tokens": None if price is None else "0",
+            "source": source,
+            "assumptions": [basis, "Image assets are not estimated; any record with assets makes the cost unknown."],
+        },
+        "output_tokens": "not estimated; listed pricing bills output tokens at 0; unknown backends may bill them",
+        "records": rows,
+        "total_input_tokens_estimate": total,
+        "estimated_cost_usd": cost,
+    }
+
+
+def classify(record, questions, key, backend, timeout, cache=None):
+    payload = request_payload(record, questions, backend)
     headers = {"Content-Type": "application/json", "User-Agent": "jev-cli/0.1"}
     if key:
         headers["Authorization"] = "Bearer " + key
-    if "assets" in record or any(q["type"] == "box" for q in questions.values()):
-        if not backend.supports_box:
-            raise JevError("Box and assets require a backend and model with image support; free Jev 1.13 is unsupported")
+    if uses_images(payload):
         headers["TypeSafe-Danger-Zone-Images"] = "true"
     body = json.dumps(
         payload,
@@ -282,6 +358,9 @@ def main(argv=None):
     parser.add_argument("--cache", type=Path, metavar="DIR", help="reuse and store successful responses in DIR; off by default")
     parser.add_argument("--labels", type=Path, help="eval: hand-labeled {id,label} JSONL file")
     parser.add_argument("--question", help="eval: Choice question name; default the only question")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="validate, then print estimated input tokens and cost as one JSON object; "
+                             "sends nothing and reads no credentials")
     args = parser.parse_args(argv)
     try:
         if not math.isfinite(args.timeout) or args.timeout <= 0:
@@ -292,6 +371,8 @@ def main(argv=None):
             raise JevError("--labels and --question are for eval")
         if args.command == "eval" and args.cache:
             raise JevError("eval sends no requests; --cache is for classify and batch")
+        if args.command == "eval" and args.dry_run:
+            raise JevError("eval sends no requests; --dry-run is for classify and batch")
         questions = load_questions(args.questions)
         if args.command == "eval":
             if not args.labels:
@@ -307,21 +388,34 @@ def main(argv=None):
         backend = Backend(args.base_url, args.model)
         if any(q["type"] == "box" for q in questions.values()) and not backend.supports_box:
             raise JevError("Box and assets require a backend and model with image support; free Jev 1.13 is unsupported")
-        key = api_key() if backend.typesafe else None
+        key = api_key() if backend.typesafe and not args.dry_run else None
         cache = Cache(args.cache) if args.cache else None
+
+        def run(record):
+            if args.dry_run:
+                return estimate(record, questions, backend)
+            return classify(record, questions, key, backend, args.timeout, cache)
+
         if args.command == "classify":
             raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
-            result = classify(read_json(raw), questions, key, backend, args.timeout, cache)
-            print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+            result = run(read_json(raw))
+            print(json.dumps(dry_run_report([result], backend) if args.dry_run else result,
+                             ensure_ascii=False, allow_nan=False))
         else:
+            rows = []
             for number, line in enumerate(sys.stdin, 1):
                 try:
-                    result = classify(read_json(line), questions, key, backend, args.timeout, cache)
+                    result = run(read_json(line))
                 except (JevError, ValueError, UnicodeError, RecursionError) as exc:
                     detail = str(exc) if isinstance(exc, JevError) else "invalid JSON record"
                     print(f"jev: batch stopped at line {number}; {detail}", file=sys.stderr)
                     return 1
-                print(json.dumps(result, ensure_ascii=False, allow_nan=False), flush=True)
+                if args.dry_run:
+                    rows.append({"line": number, **result})
+                else:
+                    print(json.dumps(result, ensure_ascii=False, allow_nan=False), flush=True)
+            if args.dry_run:
+                print(json.dumps(dry_run_report(rows, backend), ensure_ascii=False, allow_nan=False))
     except JevError as exc:
         print("jev: " + str(exc), file=sys.stderr)
         return 1
