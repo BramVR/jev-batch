@@ -6,6 +6,7 @@
 
 - `cache-rerun` a second batch with the same states and new IDs sends zero requests and prints complete answers with the new IDs.
 - `cache-miss` a different model, backend, question mapping, or assets sends a request.
+- `cache-question-forms` a version-1 question file hits the entry its equivalent legacy mapping stored, because only the unwrapped mapping is sent.
 - `cache-resume` after a batch stops at line N, a rerun of the full input sends only lines N onward.
 - `cache-no-failure` an invalid or failed response writes no entry, so the retry sends again.
 - `cache-corrupt` a corrupt entry is refetched and rewritten, and the next run hits it.
@@ -23,6 +24,7 @@ Preconditions:
 
 - **All steps.** Run `python3 .claude/skills/verify-jev/verify.py run cache`. Every step prints `PASS`.
 - **Zero-request proof.** The `rerun with new ids` step has no `stub saw` block, and its stdout lines equal the stub body with ids `a2` and `{"n": 2}`.
+- **Question-file forms.** `version-1 file hits the legacy file's entry` runs `noul.v1.json` after `question change misses` stored `noul.json`, and has no `stub saw` block.
 - **Resume proof.** `interrupted batch keeps the prefix` shows three stub requests and stderr naming line 3. The next step's `stub saw` holds only states `r3` and `r4`.
 - **Corruption.** The `before` hook of `corrupt entry refetches cleanly` truncates every entry in `cache-c`. The `retry after failure` hook fails the step if the failed response left any file.
 - **Exhaustive cover.** Hit identity over 90 request configs, every failure kind, eleven corruptions, and resume over short line sequences live in the `formal-verify-jev` skill.
