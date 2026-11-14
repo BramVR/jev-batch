@@ -30,7 +30,7 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "f03a020c0c7fb9fa75b0b89ece7fdf3cb5368a41",
+    "jev.py": "1131bd1990f2a7898f431a0f1f108681db2a7781",
     "scripts/demo_sessions.py": "5a45729868d435be631d5df31262a2218e158fb8",
 }
 KEY = "sentinel-key-not-real"
@@ -1009,6 +1009,8 @@ EVAL_ERRORS = [
     (['{"id":"x","label":"a"}'], [], ("--question", "zz"), "jev: eval needs --question naming a Choice question"),
     (['{"id":"x","label":"a"}'], [], ("--question", "r", "--cache", "eval-cache-never-created"),
      "jev: eval sends no requests; --cache is for classify and batch"),
+    (['{"id":"x","label":"a"}'], [], ("--question", "r", "--dry-run"),
+     "jev: eval sends no requests; --dry-run is for classify and batch"),
 ]
 
 
@@ -1174,6 +1176,8 @@ MUTANTS = [
      [("                return estimate(record, questions, backend)",
        "                cache and cache.store(cache.path(backend.endpoint, request_body(request_payload(record, questions, backend))), {\"answers\": {}})\n"
        "                return estimate(record, questions, backend)")]),
+    ("eval accepts --dry-run and ignores it", "eval-errors",
+     [('        if args.command == "eval" and args.dry_run:\n', '        if False:\n')]),
     ("dry run total drops a batch row", "dry-run-total-is-sum",
      [('total = sum(row["input_tokens_estimate"] for row in rows)',
        'total = sum(row["input_tokens_estimate"] for row in rows[1:]) or rows[0]["input_tokens_estimate"]')]),
@@ -1238,8 +1242,13 @@ SECTIONS = {"batch": "batch", "numbers": "numbers", "questions": "questions", "c
             "redact": "redaction", "demo": "redaction"}
 
 
+# Properties checked outside the section their prefix names; a mutant must run where its property is checked.
+PROPERTY_SECTIONS = {"dry-run-questions-like-send": "questions", "dry-run-ignores-cache": "cache",
+                     "dry-run-total-is-sum": "batch", "dry-run-batch-exit": "batch", "dry-run-batch-report": "batch"}
+
+
 def section_of(prop):
-    return SECTIONS.get(prop.split("-", 1)[0], "requests")
+    return PROPERTY_SECTIONS.get(prop) or SECTIONS.get(prop.split("-", 1)[0], "requests")
 
 
 def triage(violations):

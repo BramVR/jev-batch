@@ -12,8 +12,8 @@ Tool choice. Python has no practical code-level verifier for this program: Cross
 ## Run
 
 ```sh
-python3 .claude/skills/formal-verify-jev/check.py              # all properties, batch depth 3, ~20s
-python3 .claude/skills/formal-verify-jev/check.py --mutants    # also prove each property can fail, ~4.5min
+python3 .claude/skills/formal-verify-jev/check.py              # all properties, batch depth 3, ~25s
+python3 .claude/skills/formal-verify-jev/check.py --mutants    # also prove each property can fail, ~3.5min
 python3 .claude/skills/formal-verify-jev/check.py --only redaction   # demo redaction only, <1s
 python3 .claude/skills/formal-verify-jev/check.py --only cache # cache properties only, ~12s
 python3 .claude/skills/formal-verify-jev/check.py --only questions   # question-file versioning only, <1s
@@ -22,7 +22,7 @@ python3 .claude/skills/formal-verify-jev/check.py --depth 4 --only batch   # dee
 python3 .claude/skills/formal-verify-jev/check.py --stale      # covered files changed since the last sync?
 ```
 
-Each mutant reruns only the section that owns its property, by prefix in `SECTIONS` (`batch-`, `numbers-`, `questions-`, `cache-`, `eval-`, `redact-` and `demo-` for redaction; the rest are `requests`).
+Each mutant reruns only the section that owns its property, by prefix in `SECTIONS` (`batch-`, `numbers-`, `questions-`, `cache-`, `eval-`, `redact-` and `demo-` for redaction; the rest are `requests`). A property checked outside its prefix's section is listed in `PROPERTY_SECTIONS`, such as `dry-run-ignores-cache` in `cache`; add one there when you add such a property, or its mutant runs the wrong section and is reported `MISSED`.
 
 Exit 0 and `PASS` means no new violations, every known finding still reproduces, and, with `--mutants`, every mutant was caught.
 
@@ -68,7 +68,7 @@ Each property is one sentence of promise and one of harm.
 - `cache-resume-sends-only-missing` and `cache-resume-output`. Over every batch sequence of `LINE_KINDS` up to depth 2, an interrupted run then an all-success rerun send requests only for bodies not already stored, including duplicates within a run, and print the same merged prefix a reference model predicts. Otherwise resuming re-bills finished records or drops them.
 - `eval-offline`. `eval` sends no request and never calls `api_key`, even with `JEV_BASE_URL` at TypeSafe and a key in the env. Otherwise scoring saved results leaks data or credentials.
 - `eval-report`. For every labels/predictions pair in the domain, the report equals `eval_oracle`, a plain-loop restatement of README: denominators, `correct`, `accuracy`, `confusion[label][choice]`, and ten low-inclusive calibration buckets with `1.0` in the top one, compared bit for bit. Otherwise users trust a wrong accuracy or calibration.
-- `eval-errors`. An empty labels file, duplicate IDs in either file, a label outside criteria keys, malformed or blank lines, a missing or non-Choice question, and `--cache` exit 1 with no stdout and one `jev: ...` line naming the file and line. Otherwise ambiguous joins produce silent wrong metrics.
+- `eval-errors`. An empty labels file, duplicate IDs in either file, a label outside criteria keys, malformed or blank lines, a missing or non-Choice question, `--cache`, and `--dry-run` exit 1 with no stdout and one `jev: ...` line naming the file and line. Otherwise ambiguous joins produce silent wrong metrics.
 - `eval-inputs-unchanged`. The labels file bytes are identical after every eval run. Otherwise hand labels get corrupted.
 - `dry-run-no-network-no-credentials`. `--dry-run` never calls `urlopen` or `api_key`, for every request case and batch sequence. Otherwise pricing a run reads a key or bills it.
 - `dry-run-validates-like-send`. Dry-run `classify` exits with the same code and stderr as a real send of the same case, except the send's missing-key failure, which dry run skips by contract. Otherwise a priced run fails once sent.
