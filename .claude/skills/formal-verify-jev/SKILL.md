@@ -12,8 +12,8 @@ Tool choice. Python has no practical code-level verifier for this program: Cross
 ## Run
 
 ```sh
-python3 .claude/skills/formal-verify-jev/check.py              # all properties, batch depth 3, ~5s
-python3 .claude/skills/formal-verify-jev/check.py --mutants    # also prove each property can fail, ~20s
+python3 .claude/skills/formal-verify-jev/check.py              # all properties, batch depth 3, ~17s
+python3 .claude/skills/formal-verify-jev/check.py --mutants    # also prove each property can fail, ~3min
 python3 .claude/skills/formal-verify-jev/check.py --only redaction   # demo redaction only, <1s
 python3 .claude/skills/formal-verify-jev/check.py --only cache # cache properties only, ~12s
 python3 .claude/skills/formal-verify-jev/check.py --only questions   # question-file versioning only, <1s
@@ -54,6 +54,7 @@ Each property is one sentence of promise and one of harm.
 - `redact-before-cap`. A secret straddling the 4,000-character message cap at every cut point leaves no 6-character run of its sensitive part in the prepared sample. Otherwise truncation leaves a partial secret that no rule matches.
 - `redact-counts-kept`. Prepare counts equal the complete placeholders in the saved excerpts: one hit for a secret well inside the cap, none for one wholly past it, and none for a placeholder the cap cuts. Otherwise the summary reports redactions the saved sample does not contain.
 - `demo-send-redacts-outgoing` and `demo-opt-out-sends-raw`. `--send` redacts the outgoing copy of a raw saved sample, and `--send --no-redact` sends it as is. Otherwise old samples leak or the opt-out is silently ignored.
+- `demo-send-caches`. Every `--send`, redacted or `--no-redact`, runs `jev.py batch` with `--cache <root>/.private/demo/cache`, so the cache keys on the outgoing copy. Otherwise a rerun after a partial send bills finished records again.
 - `demo-send-utf8`. Non-ASCII sample text reaches `jev.py batch` unchanged when everything not pinned to UTF-8 is modeled as ASCII, on both the parent's pipe and the child's stdio. Otherwise sends fail or mangle text on a non-UTF-8 locale.
 - `demo-send-sample-unchanged` and `demo-send-gates`. `--send` never rewrites or resamples `sample.jsonl`, and it sends exactly when `1 <= --limit <= 20` and the sample exists with `1..limit` records, else exit 2 and no send. Otherwise approval and sample-size limits are bypassed.
 - `cache-hit-iff-same-request`. With `--cache`, a second run sends zero requests exactly when its endpoint and request body (model, state, questions in order, assets) equal the first run's. Record IDs and extra fields never split a hit; any other difference misses. Otherwise stale answers come back for a changed request, or finished work is billed again.

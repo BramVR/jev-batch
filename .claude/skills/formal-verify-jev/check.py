@@ -29,8 +29,8 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "d5f42da21006c75a6f8587d42a059fbcf13ce9c8",
-    "scripts/demo_sessions.py": "02f4ad2510ffaf4deab31a25016835b098953d1e",
+    "jev.py": "654da228ef38acbc73073c997554abd46d4a3066",
+    "scripts/demo_sessions.py": "5a45729868d435be631d5df31262a2218e158fb8",
 }
 KEY = "sentinel-key-not-real"
 SECRET_BODY = "SECRET-BODY-must-not-leak"
@@ -551,9 +551,10 @@ def drive_demo(c, argv, sample_lines):
     else:
         sample.write_text("".join(json.dumps(r) + "\n" for r in sample_lines))
     before = sample.read_bytes() if sample.exists() else None
-    sent = []
+    sent, commands = [], []
 
     def send(command, input=None, stdout=None, encoding=None, env=None, **kwargs):
+        commands.append(command)
         # Model a hostile locale: anything not pinned to UTF-8 on either side of the pipe is ASCII.
         try:
             received = input.encode(encoding or "ascii").decode((env or {}).get("PYTHONIOENCODING") or "ascii")
@@ -578,7 +579,7 @@ def drive_demo(c, argv, sample_lines):
     after = sample.read_bytes() if sample.exists() else None
     summary = (folder / "summary.json").read_text() if (folder / "summary.json").exists() else ""
     (folder / "summary.json").unlink(missing_ok=True)
-    return code, sent, before == after, out.getvalue() + err.getvalue() + summary
+    return code, sent, before == after, out.getvalue() + err.getvalue() + summary, commands
 
 
 def check_demo_send(c):
@@ -587,8 +588,10 @@ def check_demo_send(c):
     for opt_out in (False, True):
         c.cases += 1
         argv = ["--send", "--limit", "20"] + (["--no-redact"] if opt_out else [])
-        code, sent, kept, output = drive_demo(c, argv, raw)
+        code, sent, kept, output, commands = drive_demo(c, argv, raw)
         case = " ".join(argv)
+        if [cmd[-2:] for cmd in commands] != [["--cache", str(c.tmp / "demo-root/.private/demo/cache")]]:
+            c.fail("demo-send-caches", case, f"commands {commands}")
         if sent == [None]:
             c.fail("demo-send-utf8", case, "non-ASCII sample could not cross the pipe to jev.py")
             continue
@@ -612,7 +615,7 @@ def check_demo_send(c):
     for limit, count in itertools.product([-1, 0, 1, 2, 20, 21], [None, 0, 1, 2, 20, 21]):
         c.cases += 1
         records = None if count is None else [{"id": i, "state": "x"} for i in range(count)]
-        code, sent, kept, _ = drive_demo(c, ["--send", "--limit", str(limit)], records)
+        code, sent, kept, _, _ = drive_demo(c, ["--send", "--limit", str(limit)], records)
         allowed = 1 <= limit <= 20 and count is not None and 1 <= count <= limit
         case = f"--limit {limit}, sample {count}"
         if (code == 0 and len(sent) == 1) != allowed or (not allowed and (code != 2 or sent)):
@@ -843,6 +846,8 @@ MUTANTS = [
 
 # Broken variants of scripts/demo_sessions.py, checked the same way.
 DEMO_MUTANTS = [
+    ("demo send without the cache", "demo-send-caches",
+     [(', "--cache", str(folder / "cache")]', "]")]),
     ("send skips the second redaction pass", "demo-send-redacts-outgoing",
      [('outgoing, summary["redaction"] = redact_records(records)',
        'outgoing, summary["redaction"] = records, {"policy": REDACTION_POLICY, "counts": {}}')]),
