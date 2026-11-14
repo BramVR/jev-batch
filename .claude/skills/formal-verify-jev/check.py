@@ -528,6 +528,98 @@ def check_question_files(c):
             c.fail("questions-eval-same-loader", case, f"exit {run.code} stderr {run.stderr[:200]!r}")
 
 
+# P8. Summarize: offline, every record counted once, bins and diagnostics match an independent oracle.
+
+SUMMARY_ABSENT = object()
+CONFIDENCES = [SUMMARY_ABSENT, 0, 0.0, -0.0, 0.1, 0.09999999999999999, 0.5, 0.30000000000000004, 0.9, 0.9999999999999999,
+               1, 1.0, -1e-9, 1.0000000000000002, 2, "0.5", True, None]
+SUMMARY_KINDS = {f"{label}:{i}": (label, conf) for label in ("a", "b") for i, conf in enumerate(CONFIDENCES)}
+SUMMARY_KINDS.update({"bad_json": "{", "no_id": '{"answers":{"q":{"choice":"a"}}}',
+                      "score": '{"id":"s","answers":{"q":{"type":"score","score":1}}}'})
+SUMMARY_LABELS = ["a", "b", "c"]
+LONG_KINDS = ["a:0", "b:10", "score"]
+BIN_NAMES = [f"{i / 10:.1f}-{(i + 1) / 10:.1f}" for i in range(10)]
+
+
+def summary_line(kind, i):
+    spec = SUMMARY_KINDS[kind]
+    if isinstance(spec, str):
+        return spec
+    label, conf = spec
+    answer = {"type": "choice", "choice": label, "probabilities": {"a": 0.5, "b": 0.5}}
+    if conf is not SUMMARY_ABSENT:
+        answer["confidence"] = conf
+    return json.dumps({"id": [f"id{i}", i, None][i % 3], "answers": {"q": answer}})
+
+
+def oracle_bin(value):
+    return next(i for i in range(9, -1, -1) if value >= i / 10 or i == 0) if value < 1 else 9
+
+
+def check_summarize(c, depth):
+    questions = c.questions_file({"q": {"type": "choice", "criteria": {label: label for label in SUMMARY_LABELS}}})
+    # Short sequences cover every record kind; four-record sequences make the three-ID example cap bind.
+    sequences = [seq for n in range(depth + 1) for seq in itertools.product(SUMMARY_KINDS, repeat=n)]
+    sequences += list(itertools.product(LONG_KINDS, repeat=4))
+    for seq, seeded in itertools.product(sequences, (True, False)):
+        n = len(seq)
+        c.cases += 1
+        lines = [summary_line(kind, i) for i, kind in enumerate(seq)]
+        argv = ["summarize", "--question", "q", "--base-url", "https://api.typesafe.ai/v1"]
+        run = drive(c.jev, argv + (["--questions", questions] if seeded else []),
+                    "".join(line + "\n" for line in lines), {"TYPESAFE_API_KEY": KEY})
+        case = f"summarize seeded={seeded} " + ",".join(seq)
+        if not c.clean_exit("summarize-clean-exit", case, run):
+            continue
+        if run.requests or run.key_reads:
+            c.fail("summarize-offline", case, f"{len(run.requests)} requests, {run.key_reads} credential reads")
+        parse_bad = [i for i, kind in enumerate(seq) if kind in ("bad_json", "no_id")]
+        answer_bad = [i for i, kind in enumerate(seq) if kind == "score"]
+        if parse_bad or answer_bad:
+            line = (parse_bad or answer_bad)[0] + 1
+            if run.code != 1 or run.stdout or not run.stderr.startswith(f"jev: summarize stopped at line {line}; "):
+                c.fail("summarize-stop-line", case, f"exit {run.code} stderr {run.stderr!r}, expected line {line}")
+            continue
+        counts = dict.fromkeys(SUMMARY_LABELS if seeded else [], 0)
+        examples = {label: [] for label in counts}
+        bins, classes, diagnostics = [0] * 10, {"missing": 0, "malformed": 0, "out_of_range": 0}, []
+        for i, kind in enumerate(seq):
+            label, conf = SUMMARY_KINDS[kind]
+            counts[label] = counts.get(label, 0) + 1
+            examples.setdefault(label, [])
+            if len(examples[label]) < 3:
+                examples[label].append(json.loads(lines[i])["id"])
+            if conf is SUMMARY_ABSENT:
+                classes["missing"] += 1
+            elif type(conf) not in (int, float):
+                classes["malformed"] += 1
+                diagnostics.append(f"line {i + 1}: confidence {json.dumps(conf)} is not a number")
+            elif not 0 <= conf <= 1:
+                classes["out_of_range"] += 1
+                diagnostics.append(f"line {i + 1}: confidence {json.dumps(conf)} is outside [0, 1]")
+            else:
+                bins[oracle_bin(conf)] += 1
+        try:
+            got = json.loads(run.stdout)
+        except ValueError:
+            c.fail("summarize-output", case, f"exit {run.code} stdout {run.stdout[:120]!r}")
+            continue
+        conf_out = got.get("confidence", {})
+        checks = {
+            "summarize-exit": run.code == 0 and run.stderr == "".join(f"jev: {d}\n" for d in diagnostics),
+            "summarize-counts": got.get("records") == n and same(got.get("counts"), counts),
+            "summarize-examples": same(got.get("examples"), examples),
+            "summarize-bins": list(conf_out.get("bins", {})) == BIN_NAMES and list(conf_out["bins"].values()) == bins,
+            "summarize-confidence-classes": all(conf_out.get(k) == v for k, v in classes.items()),
+            "summarize-diagnostics": got.get("diagnostics") == diagnostics,
+            "summarize-denominator": sum(conf_out.get("bins", {}).values()) + sum(conf_out.get(k, 0) for k in classes)
+            == n == sum(got.get("counts", {}).values()),
+        }
+        for prop, ok in checks.items():
+            if not ok:
+                c.fail(prop, case, f"exit {run.code} stdout {run.stdout[:300]!r} stderr {run.stderr[:120]!r}")
+
+
 # P5. Demo redaction: no planted value survives, structure and IDs stay, a second pass is a no-op,
 # redaction precedes the 4000-character cap, and --send redacts its outgoing copy behind unchanged gates.
 
@@ -1181,6 +1273,14 @@ MUTANTS = [
     ("dry run total drops a batch row", "dry-run-total-is-sum",
      [('total = sum(row["input_tokens_estimate"] for row in rows)',
        'total = sum(row["input_tokens_estimate"] for row in rows[1:]) or rows[0]["input_tokens_estimate"]')]),
+    ("lower bin edge excluded", "summarize-bins",
+     [("bins[bin_names[bisect_right(CALIBRATION_EDGES, value)]]", "bins[bin_names[bisect_left(CALIBRATION_EDGES, value)]]"),
+      ("from bisect import bisect_right\n", "from bisect import bisect_left, bisect_right\n")]),
+    ("boolean confidence binned as a number", "summarize-confidence-classes",
+     [("if isinstance(value, bool) or not isinstance(value, (int, float)):", "if not isinstance(value, (int, float)):")]),
+    ("example IDs unbounded", "summarize-examples", [("        if len(bucket) < 3:\n", "        if True:\n")]),
+    ("summarize reads credentials", "summarize-offline",
+     [("            return run_summarize(args)", "            api_key()\n            return run_summarize(args)")]),
 ]
 
 # Broken variants of scripts/demo_sessions.py, checked the same way.
@@ -1232,14 +1332,15 @@ def run_all(jev, demo, depth, only=None):
                          ("numbers", lambda: check_numbers(c)), ("questions", lambda: check_question_files(c)),
                          ("redaction", lambda: (check_redaction(c), check_redact_before_cap(c), check_demo_send(c))),
                          ("cache", lambda: check_cache(c, min(depth, 2))),
-                         ("eval", lambda: check_eval(c))):
+                         ("eval", lambda: check_eval(c)),
+                         ("summarize", lambda: check_summarize(c, min(depth, 2)))):
             if only in (None, name):
                 fn()
         return c
 
 
 SECTIONS = {"batch": "batch", "numbers": "numbers", "questions": "questions", "cache": "cache", "eval": "eval",
-            "redact": "redaction", "demo": "redaction"}
+            "summarize": "summarize", "redact": "redaction", "demo": "redaction"}
 
 
 # Properties checked outside the section their prefix names; a mutant must run where its property is checked.
@@ -1284,7 +1385,7 @@ def stale():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--depth", type=int, default=3, help="max batch length to enumerate (default 3)")
-    parser.add_argument("--only", choices=["batch", "requests", "numbers", "questions", "redaction", "cache", "eval"])
+    parser.add_argument("--only", choices=["batch", "requests", "numbers", "questions", "redaction", "cache", "eval", "summarize"])
     parser.add_argument("--mutants", action="store_true", help="also prove each property fails on a broken jev.py")
     parser.add_argument("--stale", action="store_true", help="only report covered files whose content differs from SYNC_BLOBS")
     args = parser.parse_args()
