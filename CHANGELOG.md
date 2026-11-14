@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Retry 429, 5xx, timeouts, and upstream `Endpoint is unavailable` errors with capped, jittered exponential backoff that honors `Retry-After`; add `--retries` (default 3) and bounded, order-preserving batch `--concurrency` (default 1).
+- Retry 429, 5xx, connection errors, timeouts, and `Endpoint is unavailable` error bodies (any status except 401, 403, 422) with capped, jittered exponential backoff that honors `Retry-After`; add `--retries` (default 3) and bounded, order-preserving batch `--concurrency` (default 1).
 
 - Add offline `summarize` for Choice results: per-label counts, first three example IDs, and fixed confidence bins with missing, malformed, and out-of-range diagnostics; the demo reuses it.
 - Add `--dry-run` to classify and batch: validate, then report labelled input-token estimates and dated USD cost per backend/model, with no credential reads or HTTP; unknown prices stay null.

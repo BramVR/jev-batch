@@ -537,7 +537,8 @@ def main(argv=None):
                         help="validate, then print estimated input tokens and cost as one JSON object; "
                              "sends nothing and reads no credentials")
     parser.add_argument("--retries", type=int,
-                        help=f"classify/batch: retries per request after 429, 5xx, or timeout (default {DEFAULT_RETRIES}, max {MAX_RETRIES})")
+                        help=f"classify/batch: retries per request after HTTP 429 or 5xx, a connection error or timeout, or an "
+                             f"'Endpoint is unavailable' error body on a status other than 401/403/422 (default {DEFAULT_RETRIES}, max {MAX_RETRIES})")
     parser.add_argument("--concurrency", type=int,
                         help=f"batch: requests in flight (default 1, max {MAX_CONCURRENCY})")
     args = parser.parse_args(argv)
