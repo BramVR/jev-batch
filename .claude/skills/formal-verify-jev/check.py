@@ -489,7 +489,8 @@ def check_question_files(c):
                     respond=lambda i, r: json.dumps(ok_response(i)).encode())
         if not c.clean_exit("questions-clean-exit", case, run):
             continue
-        check_question_file_dry_run(c, case, command, document, run)
+        if not summarize:
+            check_question_file_dry_run(c, case, command, document, run)
         expected = None if isinstance(document, bytes) else expected_questions(document)
         if (run.code == 0) != (expected is not None):
             c.fail("questions-accept-iff-valid", case, f"exit {run.code} stderr {run.stderr[:120]!r}")
@@ -633,6 +634,20 @@ def check_summarize(c, depth):
         for prop, ok in checks.items():
             if not ok:
                 c.fail(prop, case, f"exit {run.code} stdout {run.stdout[:300]!r} stderr {run.stderr[:120]!r}")
+
+    results = c.tmp / "summarize-flags.jsonl"
+    results.write_text(summary_line("a:1", 0) + "\n", encoding="utf-8")
+    for flag, expected in ((["--cache", str(c.tmp / "summarize-cache")], "jev: summarize sends no requests; --cache is for classify and batch\n"),
+                           (["--dry-run"], "jev: summarize sends no requests; --dry-run is for classify and batch\n"),
+                           (["--labels", str(results)], "jev: --labels is for eval; --question is for eval and summarize\n")):
+        c.cases += 1
+        run = drive(c.jev, ["summarize", "--input", str(results), *flag], "", {"TYPESAFE_API_KEY": KEY})
+        case = f"summarize {flag[0]}"
+        if not c.clean_exit("summarize-clean-exit", case, run):
+            continue
+        if (run.code, run.stdout, run.stderr) != (1, "", expected) or run.requests or run.key_reads \
+                or (c.tmp / "summarize-cache").exists():
+            c.fail("summarize-flag-errors", case, f"exit {run.code} stdout {run.stdout[:80]!r} stderr {run.stderr!r}")
 
 
 # P5. Demo redaction: no planted value survives, structure and IDs stay, a second pass is a no-op,
@@ -1270,7 +1285,7 @@ MUTANTS = [
        '        if args.command == "eval":\n            questions = read_json(args.questions.read_text(encoding="utf-8"))\n'
        '            if not args.labels:')]),
     ("eval accepts --cache and ignores it", "eval-errors",
-     [('        if args.command == "eval" and args.cache:\n', '        if False:\n')]),
+     [('        if offline and args.cache:\n', '        if False:\n')]),
     ("eval writes the labels file", "eval-inputs-unchanged",
      [('            with args.labels.open(encoding="utf-8") as labels:',
        '            args.labels.write_text(args.labels.read_text(encoding="utf-8") + " ", encoding="utf-8")\n'
@@ -1299,7 +1314,7 @@ MUTANTS = [
        "                cache and cache.store(cache.path(backend.endpoint, request_body(request_payload(record, questions, backend))), {\"answers\": {}})\n"
        "                return estimate(record, questions, backend)")]),
     ("eval accepts --dry-run and ignores it", "eval-errors",
-     [('        if args.command == "eval" and args.dry_run:\n', '        if False:\n')]),
+     [('        if offline and args.dry_run:\n', '        if False:\n')]),
     ("dry run total drops a batch row", "dry-run-total-is-sum",
      [('total = sum(row["input_tokens_estimate"] for row in rows)',
        'total = sum(row["input_tokens_estimate"] for row in rows[1:]) or rows[0]["input_tokens_estimate"]')]),
@@ -1315,6 +1330,8 @@ MUTANTS = [
     ("summarize parses --questions without load_questions", "summarize-counts",
      [("        questions = load_questions(args.questions)\n        if question is None",
        "        questions = read_json(args.questions.read_text(encoding=\"utf-8\"))\n        if question is None")]),
+    ("summarize treated as a sending command", "summarize-flag-errors",
+     [('offline = args.command in ("eval", "summarize")', 'offline = args.command == "eval"')]),
     ("summarize reads credentials", "summarize-offline",
      [("            return run_summarize(args)", "            api_key()\n            return run_summarize(args)")]),
 ]
