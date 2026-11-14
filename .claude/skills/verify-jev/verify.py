@@ -109,6 +109,27 @@ def journeys(stub_url):
             Step("unknown question type rejected", ["classify", "--questions", "weird.json"],
                  '{"id":1,"state":"x"}', code=1, stderr="jev: supported question types"),
         ],
+        "question-files": [
+            Step("legacy mapping sends its questions", ["classify", "--questions", "noul.json", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[ok()],
+                 requests=lambda r: len(r) == 1 and r[0]["body"]["questions"] == NOUL),
+            Step("version-1 document sends identical questions, no wrapper",
+                 ["classify", "--questions", "noul.v1.json", *stub_args], '{"id":1,"state":"x"}', stub=[ok()],
+                 requests=lambda r: len(r) == 1 and r[0]["body"]["questions"] == NOUL
+                 and sorted(r[0]["body"]) == ["model", "questions", "state"]),
+            Step("unknown schema_version rejected before HTTP", ["classify", "--questions", "v2.json", *stub_args],
+                 '{"id":1,"state":"x"}', code=1, stderr="jev: unsupported questions schema_version; supported: 1",
+                 requests=lambda r: not r),
+            Step("extra wrapper key rejected without echo", ["classify", "--questions", "extra.v1.json", *stub_args],
+                 '{"id":1,"state":"x"}', code=1, stderr="jev: versioned questions document must contain exactly",
+                 requests=lambda r: not r),
+            Step("empty version-1 mapping rejected", ["batch", "--questions", "empty.v1.json", *stub_args],
+                 '{"id":1,"state":"x"}\n', code=1, stderr="jev: questions must be a nonempty",
+                 requests=lambda r: not r),
+            Step("malformed JSON rejected before HTTP", ["classify", "--questions", "broken.json", *stub_args],
+                 '{"id":1,"state":"x"}', code=1, stderr="jev: questions file must be readable UTF-8 JSON",
+                 requests=lambda r: not r),
+        ],
         "classify": [
             Step("stdin record, full response verbatim, no auth off TypeSafe",
                  ["classify", "--questions", "choice.json", *stub_args], '{"id":"t-1","state":"Charged twice"}',
@@ -179,7 +200,7 @@ def probability_map_ok(answer, labels):
 
 
 LIVE = [
-    Step("live classify noul", ["classify", "--questions", "noul.json"],
+    Step("live classify noul", ["classify", "--questions", "noul.v1.json"],
          '{"id":"verify-live-1","state":"I was charged twice for my subscription this month."}',
          stdout=lambda o: lines_json(o)[0]["id"] == "verify-live-1"
          and 0 <= lines_json(o)[0]["answers"]["billing"]["noul"] <= 1, timeout=90),
@@ -216,8 +237,13 @@ def write_fixtures(work):
     work.mkdir(parents=True, exist_ok=True)
     for name, value in {"noul.json": NOUL, "choice.json": CHOICE, "box.json": BOX, "empty.json": {},
                         "weird.json": {"q": {"type": "essay"}},
+                        "noul.v1.json": {"schema_version": 1, "questions": NOUL},
+                        "v2.json": {"schema_version": 2, "questions": NOUL},
+                        "extra.v1.json": {"schema_version": 1, "questions": NOUL, "note": SECRET_BODY},
+                        "empty.v1.json": {"schema_version": 1, "questions": {}},
+                        "broken.json": '{"billing": {"type": "noul"',
                         "record.json": {"id": {"ticket": 7}, "state": {"subject": "App crashes on save"}}}.items():
-        (work / name).write_text(json.dumps(value))
+        (work / name).write_text(value if isinstance(value, str) else json.dumps(value))
 
 
 def execute(step, build_dir, work, stub):
