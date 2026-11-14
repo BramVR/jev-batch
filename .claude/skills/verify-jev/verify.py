@@ -361,6 +361,13 @@ def journeys(stub_url):
                                    and (s["confidence"]["missing"], s["confidence"]["malformed"],
                                         s["confidence"]["out_of_range"]) == (1, 1, 1))(json.loads(o)),
                  requests=lambda r: r == []),
+            Step("version-1 question file seeds labels like a legacy file",
+                 ["summarize", "--questions", "choice.v1.json", "--input", "results.jsonl"], stderr="jev: line 6",
+                 stdout=lambda o: list(json.loads(o)["counts"]) == ["billing", "bug", "other"]
+                 and json.loads(o)["counts"]["other"] == 0),
+            Step("unsupported schema_version rejected before summarizing",
+                 ["summarize", "--questions", "v2.json", "--input", "results.jsonl"], code=1,
+                 stderr="jev: unsupported questions schema_version", stdout=lambda o: o == ""),
             Step("question inferred from input, labels seeded from multi-question file",
                  ["summarize", "--questions", "mixed.json", "--input", "results.jsonl"], stderr="jev: line 6",
                  stdout=lambda o: json.loads(o)["counts"] == {"billing": 3, "bug": 4, "other": 0}),
