@@ -33,6 +33,16 @@ EVAL_LABELS = "".join(json.dumps({"id": i, "label": v}) + "\n" for i, v in
 EVAL_RESULTS = "".join(json.dumps({"id": i, "answers": {"topic": {"type": "choice", "choice": c, **conf}}}) + "\n"
                        for i, c, conf in (("e1", "billing", {"confidence": 1.0}), ("e2", "billing", {"confidence": 0.5}),
                                           ("e3", "other", {}), ("e5", "bug", {"confidence": 0.9})))
+def choice_result(id_, choice, **answer):
+    return json.dumps({"id": id_, "model": "stub-model", "answers": {"topic": {
+        "type": "choice", "choice": choice, **answer, "probabilities": {"billing": 0.2, "bug": 0.5, "other": 0.3}}}})
+
+
+RESULTS = "".join(line + "\n" for line in [
+    choice_result("r-1", "bug", confidence=0), choice_result("r-2", "bug", confidence=1),
+    choice_result("r-3", "bug", confidence=0.1), choice_result("r-4", "bug", confidence=0.95),
+    choice_result("r-5", "billing"), choice_result("r-6", "billing", confidence="high"),
+    choice_result("r-7", "billing", confidence=1.5)])
 STUB_RESPONSE = ('{"model":"stub-model","answers":{"topic":{"type":"choice","choice":"bug",'
                  '"confidence":0.30000000000000004,"probabilities":{"billing":0.1,"bug":0.30000000000000004,'
                  '"other":0.6}}},"usage":{"input_tokens":12,"output_tokens":3},"future_field":[1e-7,-0.0]}')
@@ -171,7 +181,8 @@ def journeys(stub_url):
     response = json.loads(STUB_RESPONSE)
     return {
         "cli-surface": [
-            Step("help", ["--help"], stdout=lambda o: "classify" in o and "--questions" in o and "--dry-run" in o),
+            Step("help", ["--help"], stdout=lambda o: "classify" in o and "summarize" in o and "--question " in o
+                 and "--questions" in o and "--dry-run" in o),
             Step("missing questions is a usage error", ["classify"], code=2, stderr="--questions"),
             Step("nonfinite timeout rejected", ["classify", "--questions", "noul.json", "--timeout", "inf"],
                  code=1, stderr="jev: timeout must be positive and finite"),
@@ -334,6 +345,35 @@ def journeys(stub_url):
                  '{"id":1,"state":"x"}', stub=[ok()], code=1, stderr="jev: --labels is for eval; --question is for eval and summarize",
                  requests=lambda r: r == []),
         ],
+        "summarize": [
+            Step("counts, first three ids, bins with 0 and 1 edges, offline",
+                 ["summarize", "--questions", "choice.json", "--input", "results.jsonl", *stub_args],
+                 env={"TYPESAFE_API_KEY": SENTINEL_KEY}, stub=[ok()],
+                 stderr='jev: line 6: confidence "high" is not a number\njev: line 7: confidence 1.5 is outside [0, 1]\n',
+                 stdout=lambda o: (lambda s: s["question"] == "topic" and s["records"] == 7
+                                   and s["counts"] == {"billing": 3, "bug": 4, "other": 0}
+                                   and s["examples"] == {"billing": ["r-5", "r-6", "r-7"], "bug": ["r-1", "r-2", "r-3"],
+                                                         "other": []}
+                                   and s["confidence"]["bins"]["0.0-0.1"] == 1 and s["confidence"]["bins"]["0.1-0.2"] == 1
+                                   and s["confidence"]["bins"]["0.9-1.0"] == 2 and sum(s["confidence"]["bins"].values()) == 4
+                                   and (s["confidence"]["missing"], s["confidence"]["malformed"],
+                                        s["confidence"]["out_of_range"]) == (1, 1, 1))(json.loads(o)),
+                 requests=lambda r: r == []),
+            Step("stdin works without --questions", ["summarize"], RESULTS,
+                 stderr="jev: line 6", stdout=lambda o: json.loads(o)["counts"] == {"bug": 4, "billing": 3}),
+            Step("several question names need --question", ["summarize"],
+                 '{"id":1,"answers":{"a":{"type":"choice","choice":"x"},"b":{"type":"choice","choice":"y"}}}\n',
+                 code=1, stderr="jev: select one question with --question; input has a, b", stdout=lambda o: o == ""),
+            Step("--question selects one of several", ["summarize", "--question", "b"],
+                 '{"id":1,"answers":{"a":{"type":"choice","choice":"x"},"b":{"type":"choice","choice":"y"}}}\n',
+                 stdout=lambda o: json.loads(o)["counts"] == {"y": 1}),
+            Step("empty input gives zero summary", ["summarize", "--questions", "choice.json"], "",
+                 stdout=lambda o: (lambda s: s["records"] == 0 and s["counts"] == {"billing": 0, "bug": 0, "other": 0}
+                                   and not any(s["confidence"]["bins"].values()))(json.loads(o))),
+            Step("Score answer rejected with line", ["summarize"],
+                 '{"id":1,"answers":{"level":{"type":"score","score":2}}}\n', code=1,
+                 stderr="jev: summarize stopped at line 1; 'level' is not a Choice answer", stdout=lambda o: o == ""),
+        ],
         "backend-select": [
             Step("env selects base URL and model", ["classify", "--questions", "noul.json"], '{"id":1,"state":"x"}',
                  env={"JEV_BASE_URL": stub_url + "/env", "JEV_MODEL": "env-model"}, stub=[ok()],
@@ -483,7 +523,7 @@ def build(run_dir, ref):
 def write_fixtures(work):
     work.mkdir(parents=True, exist_ok=True)
     for name, value in {"noul.json": NOUL, "choice.json": CHOICE, "box.json": BOX, "empty.json": {},
-                        "weird.json": {"q": {"type": "essay"}},
+                        "weird.json": {"q": {"type": "essay"}}, "results.jsonl": RESULTS,
                         "noul.v1.json": {"schema_version": 1, "questions": NOUL},
                         "choice.v1.json": {"schema_version": 1, "questions": CHOICE},
                         "v2.json": {"schema_version": 2, "questions": NOUL},
@@ -525,7 +565,7 @@ def execute(step, build_dir, work, stub):
         problems.append(f"exit {proc.returncode}, expected {step.code}")
     if step.stderr and step.stderr not in proc.stderr:
         problems.append(f"stderr lacks {step.stderr!r}")
-    if step.code == 0 and proc.stderr:
+    if step.code == 0 and proc.stderr and not step.stderr:
         problems.append("stderr not empty on success")
     if "Traceback" in proc.stderr or SECRET_BODY in proc.stderr + proc.stdout or SENTINEL_KEY in proc.stdout:
         problems.append("traceback, private body, or key leaked to output")
@@ -643,7 +683,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="build fresh, drive journeys, keep evidence")
-    run.add_argument("journeys", nargs="*", help="cli-surface classify batch cache eval backend-select demo-redaction live-opencode")
+    run.add_argument("journeys", nargs="*", help="cli-surface classify batch summarize cache eval backend-select demo-redaction live-opencode")
     run.add_argument("--live", action="store_true", help="add live-opencode: 3 tiny synthetic requests to OpenCode")
     run.add_argument("--ref", default="worktree", help="worktree (default) or a git ref such as HEAD")
     run.add_argument("--keep-build", action="store_true")
