@@ -15,13 +15,14 @@ A user passes `--questions` a version-1 document (`{"schema_version": 1, "questi
 
 - `python3 jev.py classify|batch --questions examples/failure-patterns.v1.json`
 - `python3 jev.py classify|batch --questions examples/failure-patterns.json`
+- `eval` reads `--questions` through the same loader; its steps live in [eval](./eval.md).
 
 ## Driving it with verify.py
 
 Preconditions:
 
 - Doctor passes. No network needed.
-- Fixtures `noul.v1.json`, `v2.json`, `extra.v1.json` (extra value is the stub's private body sentinel), `empty.v1.json`, and `broken.json` live in `work/`.
+- Fixtures `noul.v1.json`, `choice.v1.json` (used by eval), `v2.json`, `extra.v1.json` (extra value is the stub's private body sentinel), `empty.v1.json`, and `broken.json` live in `work/`.
 
 - **All steps.** Run `python3 .claude/skills/verify-jev/verify.py run question-files`. Every step prints `PASS`.
 - **Proof.** The `question-files` transcript section shows identical `questions` in the stub bodies for `noul.json` and `noul.v1.json`, and zero stub requests for each rejection.

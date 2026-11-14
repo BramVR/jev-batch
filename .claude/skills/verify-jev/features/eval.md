@@ -8,6 +8,7 @@
 - `eval-denominators` missing predictions and unknown choices are unscored; extra predictions are counted and ignored; missing or out-of-range confidence is scored but not calibrated.
 - `eval-offline` nothing reaches System One even with `JEV_BASE_URL` set and a key in the env.
 - `eval-input-errors` duplicate IDs in either file, a label outside criteria keys, an empty labels file, and malformed lines exit 1 with no stdout and name the file and line.
+- `eval-question-files` `--questions` accepts either question-file form through the same loader as `classify` and `batch`; a version-1 document scores identically and an unknown `schema_version` exits 1 before scoring.
 - `eval-flags` eval requires `--labels`; `--question` must name a Choice question (optional when the mapping has one); `--labels` and `--question` are rejected on `classify` and `batch`.
 
 ## How to get to it (user POV)
@@ -19,7 +20,7 @@
 
 Preconditions:
 
-- Doctor passes. `labels.jsonl`, `dup-labels.jsonl`, and `bad-labels.jsonl` are written into `work/`; predictions come from `EVAL_RESULTS` on stdin.
+- Doctor passes. `choice.json`, `choice.v1.json`, `v2.json`, `labels.jsonl`, `dup-labels.jsonl`, and `bad-labels.jsonl` are written into `work/`; predictions come from `EVAL_RESULTS` on stdin.
 
 - **All steps.** Run `python3 .claude/skills/verify-jev/verify.py run eval`. Every step prints `PASS`.
 - **Metrics proof.** `scores fixture exactly, sends nothing` checks the hand-computed report in `eval_ok()` and that the stub saw zero requests.

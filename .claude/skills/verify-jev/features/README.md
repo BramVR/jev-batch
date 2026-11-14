@@ -6,7 +6,7 @@ The maintained source for verifying what a jev-cli user can observe. Read this i
 
 - `python3 .claude/skills/verify-jev/verify.py doctor` exits 0.
 - Each journey runs on a fresh copy under `.private/verify/<run-id>/build` with env reduced to `PATH`, `HOME`, `LANG`, plus what the step sets.
-- Fixture files (`noul.json`, `choice.json`, `box.json`, `empty.json`, `weird.json`, `record.json`, plus the question-file fixtures `noul.v1.json`, `v2.json`, `extra.v1.json`, `empty.v1.json`, `broken.json`, and eval's `labels.jsonl`, `dup-labels.jsonl`, `bad-labels.jsonl`) are written into the run's `work/` dir, which is the CLI's cwd. The same dir is `HOME` and holds one synthetic `.codex/sessions/synthetic.jsonl` for the demo journey.
+- Fixture files (`noul.json`, `choice.json`, `box.json`, `empty.json`, `weird.json`, `record.json`, plus the question-file fixtures `noul.v1.json`, `choice.v1.json`, `v2.json`, `extra.v1.json`, `empty.v1.json`, `broken.json`, and eval's `labels.jsonl`, `dup-labels.jsonl`, `bad-labels.jsonl`) are written into the run's `work/` dir, which is the CLI's cwd. The same dir is `HOME` and holds one synthetic `.codex/sessions/synthetic.jsonl` for the demo journey.
 - Offline journeys reach System One only through the loopback stub via `--base-url` or `JEV_BASE_URL`.
 
 ## Driving conventions
