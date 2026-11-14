@@ -783,6 +783,149 @@ def check_cache(c, depth):
                     c.fail("cache-resume-output", case, f"{attempt}: stdout {run.stdout[:200]!r}")
 
 
+# P7. Eval: offline, exact report against an independent oracle, hard errors for ambiguous input.
+
+EVAL_OPTIONS = ("a", "b")
+EVAL_QUESTIONS = {"r": {"type": "choice", "criteria": {"a": "A", "b": "B"}}, "n": NOUL}
+EVAL_IDS = ["x", 1]
+EVAL_EXTRA_ID = "1"
+ABSENT = object()
+EVAL_CHOICES = ["a", "b", "c", ABSENT]
+EVAL_CONFIDENCES = [ABSENT, 0.0999, 0.1, 0.9, 1.0, 1.5, True, "0.5"]
+EVAL_EDGES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+EVAL_ENV = {"TYPESAFE_API_KEY": KEY, "JEV_BASE_URL": "https://api.typesafe.ai/v1"}
+
+
+def eval_line(id, choice, confidence):
+    answer = {"type": "choice"}
+    if choice is not ABSENT:
+        answer["choice"] = choice
+    if confidence is not ABSENT:
+        answer["confidence"] = confidence
+    return json.dumps({"id": id, "model": "m", "answers": {"r": answer} if choice is not ABSENT else {}})
+
+
+def eval_oracle(labels, predictions):
+    """Plain-loop restatement of README's eval contract; predictions are (id, choice, confidence)."""
+    by_id = {}
+    for id, choice, confidence in predictions:
+        by_id[(type(id), id)] = (choice, confidence)
+    confusion = {t: {p: 0 for p in EVAL_OPTIONS} for t in EVAL_OPTIONS}
+    missing = unknown = uncalibrated = 0
+    bins = [[] for _ in EVAL_EDGES]
+    for id, truth in labels:
+        if (type(id), id) not in by_id:
+            missing += 1
+            continue
+        choice, confidence = by_id[(type(id), id)]
+        if choice not in EVAL_OPTIONS:
+            unknown += 1
+            continue
+        confusion[truth][choice] += 1
+        if type(confidence) not in (int, float) or not 0 <= confidence <= 1:
+            uncalibrated += 1
+            continue
+        index = max(i for i, edge in enumerate(EVAL_EDGES) if confidence >= edge)
+        bins[index].append((confidence, choice == truth))
+    scored = sum(sum(row.values()) for row in confusion.values())
+    correct = confusion["a"]["a"] + confusion["b"]["b"]
+    labeled_keys = {(type(id), id) for id, _ in labels}
+    highs = EVAL_EDGES[1:] + [1.0]
+    return {
+        "question": "r", "labels": list(EVAL_OPTIONS),
+        "counts": {"labeled": len(labels), "scored": scored,
+                   "unscored": {"missing_prediction": missing, "unknown_choice": unknown},
+                   "extra_predictions": len(set(by_id) - labeled_keys),
+                   "calibrated": scored - uncalibrated, "missing_confidence": uncalibrated},
+        "correct": correct, "accuracy": correct / scored if scored else None,
+        "confusion": confusion,
+        "calibration": [{"low": lo, "high": hi, "count": len(rows),
+                         "mean_confidence": sum(c for c, _ in rows) / len(rows) if rows else None,
+                         "accuracy": sum(ok for _, ok in rows) / len(rows) if rows else None}
+                        for lo, hi, rows in zip(EVAL_EDGES, highs, bins)],
+    }
+
+
+def drive_eval(c, labels_text, predictions_text, extra=("--question", "r"), questions=EVAL_QUESTIONS):
+    path = c.tmp / "labels.jsonl"
+    path.write_bytes(labels_text.encode("utf-8"))
+    run = drive(c.jev, ["eval", "--questions", c.questions_file(questions), "--labels", str(path), *extra],
+                predictions_text, EVAL_ENV, respond=lambda i, r: b'{"answers":{}}')
+    return run, path.read_bytes() == labels_text.encode("utf-8")
+
+
+def eval_common(c, prop_case, run, unchanged):
+    if run.requests or run.key_reads:
+        c.fail("eval-offline", prop_case, f"{len(run.requests)} requests, {run.key_reads} credential reads")
+    if not unchanged:
+        c.fail("eval-inputs-unchanged", prop_case, "labels file bytes changed")
+    return c.clean_exit("eval-clean-exit", prop_case, run)
+
+
+EVAL_ERRORS = [
+    # (labels lines, prediction lines, extra argv, expected stderr prefix)
+    ([], [], None, "jev: labels file has no records"),
+    (['{"id":"x","label":"a"}', '{"id":"x","label":"b"}'], [], None, "jev: labels line 2: duplicate id"),
+    (['{"id":1,"label":"a"}', '{"id":"x","label":"a"}', '{"id":1,"label":"a"}'], [], None,
+     "jev: labels line 3: duplicate id"),
+    (['{"id":"x","label":"c"}'], [], None, "jev: labels line 1: label must be one of the r options"),
+    (['{"id":"x"}'], [], None, "jev: labels line 1: label must be one of the r options"),
+    (['{"id":"x","label":["a"]}'], [], None, "jev: labels line 1: label must be one of the r options"),
+    (['{"id":"x","label":"a"}', '{"label":"a"}'], [], None, "jev: labels line 2: expected an object with id"),
+    (['["x","a"]'], [], None, "jev: labels line 1: expected an object with id"),
+    (['{"id":"x","label":"a"}', ''], [], None, "jev: labels line 2: invalid JSON"),
+    (['{"id":NaN,"label":"a"}'], [], None, "jev: labels line 1: invalid JSON"),
+    (['{"id":"x","label":"a"}'], ['{"id":"x","answers":{}}', '{"id":"x","answers":{}}'], None,
+     "jev: predictions line 2: duplicate id"),
+    (['{"id":"x","label":"a"}'], ['{"id":"x","answers":[]}'], None, "jev: predictions line 1: expected answers object"),
+    (['{"id":"x","label":"a"}'], ['{"id":"x"}'], None, "jev: predictions line 1: expected answers object"),
+    (['{"id":"x","label":"a"}'], ['{"answers":{}}'], None, "jev: predictions line 1: expected an object with id"),
+    (['{"id":"x","label":"a"}'], ['{"id":"y","answers":{}}', ''], None, "jev: predictions line 2: invalid JSON"),
+    (['{"id":"x","label":"a"}'], ['{"id":"x","answers":{"r":{"confidence":1e999}}}'], None,
+     "jev: predictions line 1: invalid JSON"),
+    (['{"id":"x","label":"a"}'], [], (), "jev: eval needs --question naming a Choice question"),
+    (['{"id":"x","label":"a"}'], [], ("--question", "n"), "jev: eval needs --question naming a Choice question"),
+    (['{"id":"x","label":"a"}'], [], ("--question", "zz"), "jev: eval needs --question naming a Choice question"),
+]
+
+
+def check_eval(c):
+    label_states = [None, "a", "b"]
+    prediction_states = [None] + list(itertools.product(EVAL_CHOICES, EVAL_CONFIDENCES))
+    per_id = list(itertools.product(label_states, prediction_states))
+    for combo in itertools.product(per_id, repeat=len(EVAL_IDS)):
+        for with_extra in (False, True):
+            c.cases += 1
+            labels = [(id, lab) for id, (lab, _) in zip(EVAL_IDS, combo) if lab is not None]
+            predictions = [(id, *pred) for id, (_, pred) in zip(EVAL_IDS, combo) if pred is not None]
+            if with_extra:
+                predictions.append((EVAL_EXTRA_ID, "a", 0.5))
+            labels_text = "".join(json.dumps({"id": id, "label": lab}) + "\n" for id, lab in labels)
+            predictions_text = "".join(eval_line(*p) + "\n" for p in predictions)
+            case = f"eval labels={labels} predictions={[(i, '-' if ch is ABSENT else ch, '-' if cf is ABSENT else cf) for i, ch, cf in predictions]}"
+            run, unchanged = drive_eval(c, labels_text, predictions_text)
+            if not eval_common(c, case, run, unchanged):
+                continue
+            if not labels:
+                if run.code != 1 or run.stdout or run.stderr != "jev: labels file has no records\n":
+                    c.fail("eval-errors", case, f"exit {run.code} stdout {run.stdout[:80]!r} stderr {run.stderr!r}")
+                continue
+            if run.code != 0 or run.stderr:
+                c.fail("eval-report", case, f"exit {run.code} stderr {run.stderr!r}")
+                continue
+            if not same(json.loads(run.stdout), eval_oracle(labels, predictions)):
+                c.fail("eval-report", case, f"stdout {run.stdout[:300]!r}")
+    for labels, predictions, extra, expected in EVAL_ERRORS:
+        c.cases += 1
+        case = f"eval-error labels={labels} predictions={predictions} argv={extra}"
+        run, unchanged = drive_eval(c, "".join(x + "\n" for x in labels), "".join(x + "\n" for x in predictions),
+                                    *(() if extra is None else (extra,)))
+        if not eval_common(c, case, run, unchanged):
+            continue
+        if run.code != 1 or run.stdout or not run.stderr.startswith(expected) or run.stderr.count("\n") != 1:
+            c.fail("eval-errors", case, f"exit {run.code} stdout {run.stdout[:80]!r} stderr {run.stderr!r}")
+
+
 # Broken variants of jev.py. Each must make the named property fail, or the check proves nothing.
 
 MUTANTS = [
@@ -842,6 +985,25 @@ MUTANTS = [
      [("cache = Cache(args.cache) if args.cache else None", "cache = Cache(args.cache / args.questions.name) if args.cache else None")]),
     ("cache never read", "cache-resume-sends-only-missing",
      [("cached = cache.load(entry) if entry else None", "cached = None")]),
+    ("eval reads credentials", "eval-offline",
+     [('        if args.command == "eval":\n            if not args.labels:',
+       '        if args.command == "eval":\n            api_key()\n            if not args.labels:')]),
+    ("calibration bins high-inclusive", "eval-report",
+     [("bins[bisect_right(CALIBRATION_EDGES, confidence)]", "bins[bisect_left(CALIBRATION_EDGES, confidence)]"),
+      ("from bisect import bisect_right", "from bisect import bisect_left")]),
+    ("out-of-range confidence calibrated", "eval-report",
+     [("or not 0 <= confidence <= 1:", "or False:")]),
+    ("confusion transposed", "eval-report",
+     [("confusion[truth][choice] += 1", "confusion[choice][truth] += 1")]),
+    ("duplicate label ids accepted", "eval-errors",
+     [('        if key in labels:\n            raise JevError(f"labels line {number}: duplicate id")\n',
+       '        if False:\n            raise JevError(f"labels line {number}: duplicate id")\n')]),
+    ("duplicate prediction ids accepted", "eval-errors",
+     [('        if id_key(record["id"]) in predictions:', '        if False:')]),
+    ("eval writes the labels file", "eval-inputs-unchanged",
+     [('            with args.labels.open(encoding="utf-8") as labels:',
+       '            args.labels.write_text(args.labels.read_text(encoding="utf-8") + " ", encoding="utf-8")\n'
+       '            with args.labels.open(encoding="utf-8") as labels:')]),
 ]
 
 # Broken variants of scripts/demo_sessions.py, checked the same way.
@@ -890,10 +1052,19 @@ def run_all(jev, demo, depth, only=None):
         for name, fn in (("batch", lambda: check_batch(c, depth)), ("requests", lambda: check_requests(c)),
                          ("numbers", lambda: check_numbers(c)), ("questions", lambda: check_question_files(c)),
                          ("redaction", lambda: (check_redaction(c), check_redact_before_cap(c), check_demo_send(c))),
-                         ("cache", lambda: check_cache(c, min(depth, 2)))):
+                         ("cache", lambda: check_cache(c, min(depth, 2))),
+                         ("eval", lambda: check_eval(c))):
             if only in (None, name):
                 fn()
         return c
+
+
+SECTIONS = {"batch": "batch", "numbers": "numbers", "questions": "questions", "cache": "cache", "eval": "eval",
+            "redact": "redaction", "demo": "redaction"}
+
+
+def section_of(prop):
+    return SECTIONS.get(prop.split("-", 1)[0], "requests")
 
 
 def triage(violations):
@@ -929,7 +1100,7 @@ def stale():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--depth", type=int, default=3, help="max batch length to enumerate (default 3)")
-    parser.add_argument("--only", choices=["batch", "requests", "numbers", "questions", "redaction", "cache"])
+    parser.add_argument("--only", choices=["batch", "requests", "numbers", "questions", "redaction", "cache", "eval"])
     parser.add_argument("--mutants", action="store_true", help="also prove each property fails on a broken jev.py")
     parser.add_argument("--stale", action="store_true", help="only report covered files whose content differs from SYNC_BLOBS")
     args = parser.parse_args()
@@ -959,9 +1130,9 @@ def main():
         code = 1
 
     if args.mutants:
-        suites = [(TARGET, source, MUTANTS, "batch requests numbers questions cache", lambda m: (load(m), load(demo_source, DEMO))),
-                  (DEMO, demo_source, DEMO_MUTANTS, "redaction", lambda m: (load(source), load(m, DEMO)))]
-        for path, original, mutants, scope, modules in suites:
+        suites = [(TARGET, source, MUTANTS, lambda m: (load(m), load(demo_source, DEMO))),
+                  (DEMO, demo_source, DEMO_MUTANTS, lambda m: (load(source), load(m, DEMO)))]
+        for path, original, mutants, modules in suites:
             for label, prop, edits in mutants:
                 mutated = original
                 for old, new_text in edits:
@@ -970,8 +1141,7 @@ def main():
                     mutated = mutated.replace(old, new_text)
                 else:
                     jev, demo = modules(mutated)
-                    caught = any(any(p == prop for p, _, _ in run_all(jev, demo, min(args.depth, 2), only).violations)
-                                 for only in scope.split())
+                    caught = any(p == prop for p, _, _ in run_all(jev, demo, min(args.depth, 2), section_of(prop)).violations)
                     print(f"MUTANT {'caught' if caught else 'MISSED'}  {label} -> {prop}")
                     code = code if caught else 1
                     continue
