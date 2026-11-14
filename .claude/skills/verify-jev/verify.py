@@ -113,7 +113,8 @@ def ok(body=STUB_RESPONSE):
 
 
 def lines_json(out):
-    return [json.loads(x) for x in out.splitlines()]
+    # Split on "\n" only: jev writes ensure_ascii=False, so U+2028 inside a JSON string must not end a line.
+    return [json.loads(x) for x in out.split("\n") if x]
 
 
 def paths(reqs):
@@ -240,9 +241,9 @@ def journeys(stub_url):
         ],
         "batch": [
             Step("three lines in order, duplicate ids kept", ["batch", "--questions", "choice.json", *stub_args],
-                 '{"id":"a","state":"one"}\n{"id":"a","state":"two"}\n{"id":3,"state":["three"]}\n',
+                 '{"id":"a","state":"one"}\n{"id":"a","state":"two"}\n{"id":"c\u2028","state":["three"]}\n',
                  stub=[ok(), ok(), ok()],
-                 stdout=lambda o: [x["id"] for x in lines_json(o)] == ["a", "a", 3]
+                 stdout=lambda o: [x["id"] for x in lines_json(o)] == ["a", "a", "c\u2028"]
                  and all(x["answers"] == response["answers"] for x in lines_json(o)),
                  requests=lambda r: [x["body"]["state"] for x in r] == ["one", "two", ["three"]]),
             Step("API failure on line 2 keeps line 1, stops", ["batch", "--questions", "choice.json", *stub_args],
@@ -561,7 +562,7 @@ def execute(step, build_dir, work, stub):
     # Fixture files live in `work`; the CLI runs from there as `python3 <build>/<script> ...`.
     cmd = [sys.executable, str(build_dir / step.script), *step.argv]
     started = time.monotonic()
-    proc = subprocess.run(cmd, input=step.stdin, capture_output=True, text=True, cwd=work, env=env,
+    proc = subprocess.run(cmd, input=step.stdin, capture_output=True, text=True, encoding="utf-8", cwd=work, env=env,
                           timeout=step.timeout)
     elapsed = time.monotonic() - started
     time.sleep(0.05)
