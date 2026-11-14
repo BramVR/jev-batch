@@ -66,6 +66,7 @@ class Capture:
     def __exit__(self, *exc):
         self.server.shutdown()
         self.server.server_close()
+REAL_RUN = subprocess.run
 
 
 class DemoTests(unittest.TestCase):
@@ -79,16 +80,19 @@ class DemoTests(unittest.TestCase):
             sample = folder / 'sample.jsonl'
             sample.write_text(raw)
             before = hashlib.sha256(sample.read_bytes()).digest()
+            shutil.copy(Path(demo.__file__).parents[1] / 'jev.py', root / 'jev.py')
             (root / 'examples').mkdir()
             (root / 'examples/failure-patterns.json').write_text(json.dumps({
-                'failure_pattern': {'criteria': {'fine': 'Fine', 'loop': 'Loop'}}}))
+                'failure_pattern': {'type': 'choice', 'criteria': {'fine': 'Fine', 'loop': 'Loop'}}}))
 
-            def send(command, input, stdout, **kwargs):
+            def send(command, input=None, stdout=None, **kwargs):
+                if command[2] == 'summarize':
+                    return REAL_RUN(command, **kwargs)
                 self.assertEqual(input, raw)
                 self.assertEqual(command[-2:], ['--cache', str(folder / 'cache')])
                 for record in records:
                     stdout.write(json.dumps({'id': record['id'], 'answers': {
-                        'failure_pattern': {'choice': 'fine'}}}) + '\n')
+                        'failure_pattern': {'choice': 'fine', 'confidence': 0.95}}}) + '\n')
                 return subprocess.CompletedProcess(command, 0, stderr='')
 
             with patch.object(demo, 'ROOT', root), patch.object(demo, 'prepare_sample') as prepare, \
@@ -101,6 +105,7 @@ class DemoTests(unittest.TestCase):
             self.assertEqual(summary['classification_counts'], {'fine': 8, 'loop': 0})
             self.assertEqual(summary['example_ids_by_category'], {
                 'fine': ['synthetic-0', 'synthetic-1', 'synthetic-2'], 'loop': []})
+            self.assertEqual(summary['confidence']['bins']['0.9-1.0'], 8)
             self.assertEqual(summary['unclassified'], 0)
 
     def test_limit_and_missing_sample_rejected_before_send(self):

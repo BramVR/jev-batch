@@ -146,13 +146,14 @@ def main(argv=None):
         results = [json.loads(line) for line in (folder / "results.jsonl").read_text(encoding="utf-8").splitlines()]
         if [r["id"] for r in results] != summary["session_ids"][:len(results)]:
             raise ValueError("result ids differ from input order")
-        summary["classification_counts"] = dict(Counter(r["answers"]["failure_pattern"]["choice"] for r in results))
-        categories = json.loads((ROOT / "examples/failure-patterns.json").read_text())["failure_pattern"]["criteria"]
-        summary["classification_counts"] = {category: summary["classification_counts"].get(category, 0) for category in categories}
-        summary["example_ids_by_category"] = {
-            category: [r["id"] for r in results if r["answers"]["failure_pattern"]["choice"] == category][:3]
-            for category in categories
-        }
+        counted = subprocess.run([sys.executable, str(ROOT / "jev.py"), "summarize", "--questions",
+                                  str(ROOT / "examples/failure-patterns.json"), "--question", "failure_pattern",
+                                  "--input", str(folder / "results.jsonl")], capture_output=True, check=True,
+                                 encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        counts = json.loads(counted.stdout)
+        summary["classification_counts"] = counts["counts"]
+        summary["example_ids_by_category"] = counts["examples"]
+        summary["confidence"] = counts["confidence"]
         summary["unclassified"] -= len(results)
         summary["api_exit_code"] = run.returncode
         summary["diagnostic"] = run.stderr.strip()
