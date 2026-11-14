@@ -72,6 +72,7 @@ class Step:
     setup: object = None
     files: object = None
     before: object = None
+    min_seconds: float = 0
 
 
 # Stub System One: a real HTTP server on 127.0.0.1 reached through the user-facing --base-url.
@@ -79,22 +80,31 @@ class Step:
 class Stub:
     def __init__(self):
         self.queue, self.seen = [], []
+        self.lock, self.active = threading.Lock(), 0
         stub = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-                stub.seen.append({"method": "POST", "path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()},
-                                  "body": json.loads(raw), "bytes": len(raw)})
-                status, body, delay = stub.queue.pop(0) if stub.queue else (500, SECRET_BODY, 0)
-                time.sleep(delay)
+                with stub.lock:
+                    stub.active += 1
+                    stub.seen.append({"method": "POST", "path": self.path, "in_flight": stub.active,
+                                      "headers": {k.lower(): v for k, v in self.headers.items()}, "body": json.loads(raw),
+                                      "bytes": len(raw)})
+                    status, body, delay, *extra = stub.queue.pop(0) if stub.queue else (500, SECRET_BODY, 0)
                 try:
+                    time.sleep(delay)
                     self.send_response(status)
                     self.send_header("Content-Type", "application/json")
+                    for name, value in (extra[0] if extra else {}).items():
+                        self.send_header(name, value)
                     self.end_headers()
                     self.wfile.write(body.encode())
                 except (BrokenPipeError, ConnectionResetError):
                     pass
+                finally:
+                    with stub.lock:
+                        stub.active -= 1
 
             def log_message(self, *args):
                 pass
@@ -108,8 +118,8 @@ class Stub:
         self.server.server_close()
 
 
-def ok(body=STUB_RESPONSE):
-    return (200, body, 0)
+def ok(body=STUB_RESPONSE, delay=0):
+    return (200, body, delay)
 
 
 def lines_json(out):
@@ -192,6 +202,14 @@ def journeys(stub_url):
                  code=1, stderr="jev: batch reads JSONL from stdin"),
             Step("eval refuses --input", ["eval", "--questions", "choice.json", "--labels", "x", "--input", "record.json"],
                  code=1, stderr="jev: eval reads JSONL from stdin"),
+            Step("concurrency 0 rejected before sending", ["batch", "--questions", "noul.json", "--concurrency", "0",
+                                                           *stub_args], '{"id":1,"state":"x"}', stub=[ok()], code=1,
+                 stderr="jev: concurrency must be between 1 and 32", requests=lambda r: r == []),
+            Step("retries 11 rejected before sending", ["classify", "--questions", "noul.json", "--retries", "11",
+                                                        *stub_args], '{"id":1,"state":"x"}', stub=[ok()], code=1,
+                 stderr="jev: retries must be between 0 and 10", requests=lambda r: r == []),
+            Step("non-integer concurrency is a usage error", ["batch", "--questions", "noul.json", "--concurrency", "two"],
+                 code=2, stderr="--concurrency"),
             Step("empty question mapping rejected", ["classify", "--questions", "empty.json"],
                  '{"id":1,"state":"x"}', code=1, stderr="jev: questions must be a nonempty"),
             Step("unknown question type rejected", ["classify", "--questions", "weird.json"],
@@ -232,12 +250,24 @@ def journeys(stub_url):
             Step("--input file record", ["classify", "--questions", "choice.json", "--input", "record.json", *stub_args],
                  stub=[ok()], stdout=lambda o: lines_json(o)[0]["id"] == {"ticket": 7},
                  requests=lambda r: r[0]["body"]["state"] == {"subject": "App crashes on save"}),
-            Step("HTTP 503 fails once, no retry, no body echo", ["classify", "--questions", "choice.json", *stub_args],
-                 '{"id":1,"state":"x"}', stub=[(503, SECRET_BODY, 0)], code=1,
-                 stderr="jev: System One HTTP 503; no retry performed", requests=lambda r: len(r) == 1),
-            Step("timeout fails once", ["classify", "--questions", "choice.json", "--timeout", "0.5", *stub_args],
+            Step("HTTP 503 retried to the limit, no body echo",
+                 ["classify", "--questions", "choice.json", "--retries", "1", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[(503, SECRET_BODY, 0), (503, SECRET_BODY, 0)], code=1,
+                 stderr="jev: System One HTTP 503; gave up after 2 attempts", requests=lambda r: len(r) == 2),
+            Step("HTTP 503 then success recovers", ["classify", "--questions", "choice.json", *stub_args],
+                 '{"id":"r","state":"x"}', stub=[(503, SECRET_BODY, 0), ok()],
+                 stdout=lambda o: lines_json(o) == [{"id": "r", **response}], requests=lambda r: len(r) == 2),
+            Step("HTTP 401 is not retried", ["classify", "--questions", "choice.json", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[(401, SECRET_BODY, 0), ok()], code=1,
+                 stderr="jev: System One HTTP 401; not retryable", requests=lambda r: len(r) == 1),
+            Step("HTTP 422 is not retried", ["classify", "--questions", "choice.json", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[(422, SECRET_BODY, 0), ok()], code=1,
+                 stderr="jev: System One HTTP 422; not retryable", requests=lambda r: len(r) == 1),
+            Step("timeout with --retries 0 fails once",
+                 ["classify", "--questions", "choice.json", "--timeout", "0.5", "--retries", "0", *stub_args],
                  '{"id":1,"state":"x"}', stub=[(200, STUB_RESPONSE, 2)], code=1,
-                 stderr="jev: System One connection failed or timed out", requests=lambda r: len(r) == 1),
+                 stderr="jev: System One connection failed or timed out; gave up after 1 attempt",
+                 requests=lambda r: len(r) == 1),
         ],
         "batch": [
             Step("three lines in order, duplicate ids kept", ["batch", "--questions", "choice.json", *stub_args],
@@ -246,11 +276,31 @@ def journeys(stub_url):
                  stdout=lambda o: [x["id"] for x in lines_json(o)] == ["a", "a", "c\u2028"]
                  and all(x["answers"] == response["answers"] for x in lines_json(o)),
                  requests=lambda r: [x["body"]["state"] for x in r] == ["one", "two", ["three"]]),
-            Step("API failure on line 2 keeps line 1, stops", ["batch", "--questions", "choice.json", *stub_args],
+            Step("API failure on line 2 keeps line 1, stops",
+                 ["batch", "--questions", "choice.json", "--retries", "0", *stub_args],
                  '{"id":1,"state":"a"}\n{"id":2,"state":"b"}\n{"id":3,"state":"c"}\n',
                  stub=[ok(), (500, SECRET_BODY, 0), ok()], code=1,
-                 stderr="jev: batch stopped at line 2; System One HTTP 500",
+                 stderr="jev: batch stopped at line 2; System One HTTP 500; gave up after 1 attempt",
                  stdout=lambda o: [x["id"] for x in lines_json(o)] == [1], requests=lambda r: len(r) == 2),
+            Step("429 Retry-After then 503 then success, one result per line in order",
+                 ["batch", "--questions", "choice.json", "--retries", "2", *stub_args],
+                 '{"id":1,"state":"a"}\n{"id":2,"state":"b"}\n{"id":3,"state":"c"}\n',
+                 stub=[(429, SECRET_BODY, 0, {"Retry-After": "1"}), (503, SECRET_BODY, 0), ok(), ok(), ok()],
+                 stdout=lambda o: [x["id"] for x in lines_json(o)] == [1, 2, 3],
+                 requests=lambda r: [x["body"]["state"] for x in r] == ["a", "a", "a", "b", "c"], min_seconds=1),
+            Step("exhausted retries on line 2 keep line 1",
+                 ["batch", "--questions", "choice.json", "--retries", "1", *stub_args],
+                 '{"id":1,"state":"a"}\n{"id":2,"state":"b"}\n{"id":3,"state":"c"}\n',
+                 stub=[ok(), (503, SECRET_BODY, 0), (529, SECRET_BODY, 0), ok()], code=1,
+                 stderr="jev: batch stopped at line 2; System One HTTP 529; gave up after 2 attempts",
+                 stdout=lambda o: [x["id"] for x in lines_json(o)] == [1],
+                 requests=lambda r: [x["body"]["state"] for x in r] == ["a", "b", "b"]),
+            Step("concurrency 3 never exceeds 3 in flight, output in input order",
+                 ["batch", "--questions", "choice.json", "--concurrency", "3", *stub_args],
+                 "".join(json.dumps({"id": i, "state": f"s{i}"}) + "\n" for i in range(8)),
+                 stub=[ok(delay=0.05 * (8 - i)) for i in range(8)],
+                 stdout=lambda o: [x["id"] for x in lines_json(o)] == list(range(8)),
+                 requests=lambda r: len(r) == 8 and max(x["in_flight"] for x in r) == 3),
             Step("invalid line 2 stops before sending it", ["batch", "--questions", "choice.json", *stub_args],
                  '{"id":1,"state":"a"}\n{not json\n{"id":3,"state":"c"}\n', stub=[ok(), ok()], code=1,
                  stderr="jev: batch stopped at line 2; invalid JSON record",
@@ -586,6 +636,8 @@ def execute(step, build_dir, work, stub):
         problems.append(f"exit {proc.returncode}, expected {step.code}")
     if step.stderr and step.stderr not in proc.stderr:
         problems.append(f"stderr lacks {step.stderr!r}")
+    if elapsed < step.min_seconds:
+        problems.append(f"finished in {elapsed:.2f}s, expected at least {step.min_seconds}s")
     if step.code == 0 and proc.stderr and not step.stderr:
         problems.append("stderr not empty on success")
     if "Traceback" in proc.stderr or SECRET_BODY in proc.stderr + proc.stdout or SENTINEL_KEY in proc.stdout:
@@ -600,7 +652,7 @@ def execute(step, build_dir, work, stub):
     shown = " ".join(["python3", step.script, *step.argv])
     return {"step": step.name, "command": shown, "stdin": step.stdin, "env": sorted(step.env),
             "exit": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr, "seconds": round(elapsed, 2),
-            "stub_requests": [{k: r[k] for k in ("path", "bytes", "body")} | {"headers": {
+            "stub_requests": [{k: r[k] for k in ("path", "in_flight", "bytes", "body")} | {"headers": {
                 h: v for h, v in r["headers"].items() if h in ("user-agent", "authorization", "content-type",
                                                                "typesafe-danger-zone-images")}} for r in seen],
             "problems": problems}
