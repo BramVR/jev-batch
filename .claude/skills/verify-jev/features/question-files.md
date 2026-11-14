@@ -11,6 +11,8 @@ A user passes `--questions` a version-1 document (`{"schema_version": 1, "questi
 - `empty-reject` an empty mapping, wrapped or not, exits 1 with `questions must be a nonempty API question mapping`.
 - `json-reject` invalid JSON, non-UTF-8, or nonfinite numbers exit 1 with `questions file must be readable UTF-8 JSON`.
 
+`--dry-run` loads question files the same way; the `dry-run` journey proves a version-1 file is priced on the unwrapped mapping.
+
 ## How to get to it (user POV)
 
 - `python3 jev.py classify|batch --questions examples/failure-patterns.v1.json`

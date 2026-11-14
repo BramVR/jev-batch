@@ -139,7 +139,8 @@ class EvalTests(unittest.TestCase):
             qpath.write_text(json.dumps(QUESTIONS))
             for argv in (["batch", "--labels", "x"], ["classify", "--question", "route"],
                          ["eval"], ["eval", "--labels", "x", "--input", "y"],
-                         ["eval", "--labels", "x", "--cache", str(Path(tmp) / "cache")]):
+                         ["eval", "--labels", "x", "--cache", str(Path(tmp) / "cache")],
+                         ["eval", "--labels", "x", "--dry-run"]):
                 err = io.StringIO()
                 with contextlib.redirect_stderr(err), patch("urllib.request.urlopen", side_effect=AssertionError):
                     self.assertEqual(jev.main([*argv, "--questions", str(qpath)]), 1, argv)

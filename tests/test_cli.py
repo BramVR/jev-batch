@@ -1,4 +1,5 @@
 import contextlib
+from decimal import Decimal
 import io
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
@@ -322,10 +323,131 @@ class CliTests(unittest.TestCase):
         self.assertEqual((code, len(sent), json.loads(out)), (0, 1, {"id": 1, **RESPONSE}))
         self.assertIn("could not write cache entry", err)
 
+    def dry_run(self, data, *extra, command="batch"):
+        with patch("jev.api_key") as key, patch("subprocess.run") as keychain, patch("sys.platform", "darwin"):
+            code, out, err, sent = self.run_cli(data, command, extra=["--dry-run", *extra],
+                                                env={"TYPESAFE_API_KEY": ""})
+        self.assertEqual(sent, [])
+        key.assert_not_called()
+        keychain.assert_not_called()
+        return code, out, err
+
+    def test_dry_run_typesafe_cost_without_credentials_or_http(self):
+        code, out, err = self.dry_run('{"id":"a","state":"ok"}\n{"id":"b","state":"okay"}\n',
+                                      "--base-url", "https://api.typesafe.ai/v1", "--model", "jev-1.14.0")
+        self.assertEqual((code, err), (0, ""))
+        report = json.loads(out)
+        bodies = [json.dumps({"model": "jev-1.14.0", "state": state, "questions": QUESTIONS}) for state in ("ok", "okay")]
+        tokens = [-(-len(body) // 4) for body in bodies]
+        self.assertEqual([(r["line"], r["id"], r["input_tokens_estimate"]) for r in report["records"]],
+                         [(1, "a", tokens[0]), (2, "b", tokens[1])])
+        self.assertEqual(report["total_input_tokens_estimate"], sum(tokens))
+        self.assertEqual(Decimal(report["estimated_cost_usd"]), Decimal("0.042") * sum(tokens) / 1000000)
+        self.assertNotEqual(Decimal(report["estimated_cost_usd"]), 0)
+        self.assertEqual(report["backend"], {"endpoint": "https://api.typesafe.ai/v1/systemone", "model": "jev-1.14.0"})
+        self.assertEqual((report["pricing"]["status"], report["pricing"]["currency"], report["pricing"]["date"],
+                          report["pricing"]["input_usd_per_million_tokens"], report["pricing"]["output_usd_per_million_tokens"]),
+                         ("priced", "USD", "2026-11-14", "0.042", "0"))
+        self.assertIn("not a tokenizer count", report["token_method"])
+
+    def test_dry_run_free_default_costs_zero(self):
+        code, out, err = self.dry_run('{"id":1,"state":"hello"}', command="classify")
+        self.assertEqual((code, err), (0, ""))
+        report = json.loads(out)
+        self.assertEqual((report["pricing"]["status"], report["estimated_cost_usd"]), ("free", "0"))
+        self.assertEqual(report["backend"]["model"], "jev-1.13-free")
+        self.assertGreater(report["total_input_tokens_estimate"], 0)
+
+    def test_dry_run_unknown_price_is_null(self):
+        for base_url, model in (("https://api.typesafe.ai/v1", "mystery-model"), ("http://localhost:9/v1", "jev-1.14.0"),
+                                ("http://api.typesafe.ai/v1", "jev-1.14.0")):
+            code, out, err = self.dry_run('{"id":1,"state":"ok"}', "--base-url", base_url, "--model", model)
+            self.assertEqual((code, err), (0, ""))
+            report = json.loads(out)
+            self.assertEqual((report["pricing"]["status"], report["pricing"]["input_usd_per_million_tokens"],
+                              report["pricing"]["source"], report["estimated_cost_usd"]), ("unknown", None, None, None))
+            self.assertEqual(report["total_input_tokens_estimate"], report["records"][0]["input_tokens_estimate"])
+
+    def test_dry_run_measures_the_exact_unicode_bytes_sent(self):
+        record = '{"id":"u","state":"日本語🙂 refund ünï"}'
+        _, _, _, sent = self.run_cli(record, "classify")
+        body = sent[0][0].data
+        code, out, _ = self.dry_run(record, command="classify")
+        self.assertEqual(code, 0)
+        row = json.loads(out)["records"][0]
+        self.assertEqual(row["request_bytes"], len(body))
+        self.assertEqual(row["input_tokens_estimate"], -(-len(body) // 4))
+        self.assertIn(b"\\u65e5", body)
+
+    def test_dry_run_more_questions_raise_overhead(self):
+        one = json.loads(self.dry_run('{"id":1,"state":"ok"}')[1])["records"][0]
+        self.assertEqual(one["question_tokens_estimate"], -(-len(json.dumps(QUESTIONS)) // 4))
+        with patch.dict(QUESTIONS, {"billing": {"type": "noul", "instructions": "Is this about billing?"}}):
+            two = json.loads(self.dry_run('{"id":1,"state":"ok"}')[1])["records"][0]
+        self.assertGreater(two["question_tokens_estimate"], one["question_tokens_estimate"])
+        self.assertGreater(two["input_tokens_estimate"], one["input_tokens_estimate"])
+        self.assertEqual(two["state_tokens_estimate"], one["state_tokens_estimate"])
+
+    def test_dry_run_assets_make_cost_unknown(self):
+        extra = ("--base-url", "https://api.typesafe.ai/v1", "--model", "jev-1.14.0")
+        plain = json.loads(self.dry_run('{"id":1,"state":"ok"}', *extra)[1])
+        code, out, _ = self.dry_run('{"id":1,"state":"ok","assets":{"img":{"data_base64":"AAAA"}}}', *extra)
+        report = json.loads(out)
+        self.assertEqual((code, report["estimated_cost_usd"]), (0, None))
+        self.assertIs(report["records"][0]["assets_not_estimated"], True)
+        self.assertEqual(report["total_input_tokens_estimate"], plain["total_input_tokens_estimate"])
+        self.assertEqual(report["records"][0]["request_bytes"] - plain["records"][0]["request_bytes"],
+                         len(', "assets": {"img": {"data_base64": "AAAA"}}'))
+        self.assertEqual(self.dry_run('{"id":1,"state":"ok","assets":{}}')[0], 1)
+
+    def test_dry_run_invalid_line_prints_no_report(self):
+        for bad in ('{"state":"bad"}', "not json"):
+            code, out, err = self.dry_run('{"id":1,"state":"ok"}\n' + bad + "\n")
+            self.assertEqual((code, out), (1, ""))
+            self.assertIn("jev: batch stopped at line 2;", err)
+        code, out, err = self.dry_run('{"id":1}', command="classify")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("record must be an object with id and state", err)
+
+    def test_dry_run_is_deterministic(self):
+        data = "\n".join(json.dumps({"id": i, "state": {"text": "x" * i, "note": "é"}}) for i in range(5))
+        first, second = self.dry_run(data)[1], self.dry_run(data)[1]
+        self.assertEqual(first, second)
+        report = json.loads(first)
+        self.assertEqual(report["total_input_tokens_estimate"],
+                         sum(r["input_tokens_estimate"] for r in report["records"]))
+
+    def test_dry_run_ignores_cache(self):
+        records = '{"id":"a","state":"one"}\n{"id":"b","state":"two"}\n'
+        plain = self.dry_run(records)[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = Path(tmp) / "empty"
+            self.assertEqual(self.dry_run(records, "--cache", str(empty))[1], plain)
+            self.assertFalse(empty.exists())
+            warm = Path(tmp) / "warm"
+            self.assertEqual(len(self.run_cli(records, extra=["--cache", str(warm)])[3]), 2)
+            before = {p: p.read_bytes() for p in warm.rglob("*") if p.is_file()}
+            self.assertEqual(self.dry_run(records, "--cache", str(warm))[1], plain)
+            self.assertEqual({p: p.read_bytes() for p in warm.rglob("*") if p.is_file()}, before)
+
+    def test_dry_run_process_without_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "q.json"
+            path.write_text(json.dumps(QUESTIONS))
+            run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "batch", "--dry-run", "--questions", str(path),
+                                  "--base-url", "https://api.typesafe.ai/v1", "--model", "jev-1.14.0"],
+                                 cwd=ROOT, env={"PATH": os.environ["PATH"]}, input='{"id":"p","state":"hello"}\n',
+                                 capture_output=True, text=True, timeout=10)
+        self.assertEqual((run.returncode, run.stderr), (0, ""))
+        report = json.loads(run.stdout)
+        self.assertEqual(report["records"][0]["id"], "p")
+        self.assertNotEqual(Decimal(report["estimated_cost_usd"]), 0)
+
     def test_help_as_process(self):
         result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "--help"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0)
         self.assertIn("batch", result.stdout)
+        self.assertIn("sends nothing and reads no credentials", " ".join(result.stdout.split()))
 
 
 if __name__ == "__main__":

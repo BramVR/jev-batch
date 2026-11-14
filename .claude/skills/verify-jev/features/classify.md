@@ -1,6 +1,6 @@
 # Classify one record
 
-`classify` sends one `{id,state}` record and prints `{"id": <id>, ...<full API response>}` with every probability untouched.
+`classify` sends one `{id,state}` record and prints `{"id": <id>, ...<full API response>}` with every probability untouched. With `--dry-run` it sends nothing and prints an estimate report instead; see [Dry run](./dry-run.md).
 
 ## Sub-features
 

@@ -1,6 +1,6 @@
 ---
 name: verify-jev
-description: "Drive the jev-cli command line (jev.py classify/batch/eval, scripts/demo_sessions.py) end to end against a fresh copy and capture evidence. Use after changing jev.py, the demo script or its redaction, flags, backend selection, cache, or output, or when asked to prove the CLI works."
+description: "Drive the jev-cli command line (jev.py classify/batch including --dry-run estimates, eval, scripts/demo_sessions.py) end to end against a fresh copy and capture evidence. Use after changing jev.py, the demo script or its redaction, flags, backend selection, cache, pricing, or output, or when asked to prove the CLI works."
 ---
 
 # Verify jev-cli
@@ -33,7 +33,7 @@ python3 .claude/skills/verify-jev/verify.py run --live live-opencode  # 3 real O
 - Journeys are data in `journeys()` and `LIVE` in `verify.py`. A step's optional `before(work)` hook prepares or checks files in `work/` before it runs; returning `False` fails the step. The feature map below says what each proves. Add a step there when you add a user-facing behavior.
 - Ad-hoc driving, for a case no journey covers: `run --keep-build cli-surface`, then from `.private/verify/<run-id>/work/` run `python3 ../build/jev.py ...` yourself and save the command, stdout, stderr, and exit code under that run's `evidence/`. The stub is gone by then, so offline request checks belong in a new journey step instead.
 
-Live rules. Only `--live` touches the network, and only `opencode.ai/zen/v1/systemone` with the synthetic records in `LIVE`. Never feed session data, `.private/demo/` files, or any real user text to a live step. Never point a live step at TypeSafe; that needs a real key.
+Live rules. Only `--live` touches the network. `--dry-run` steps target real hostnames for pricing but never connect, and only `opencode.ai/zen/v1/systemone` with the synthetic records in `LIVE`. Never feed session data, `.private/demo/` files, or any real user text to a live step. Never point a live step at TypeSafe; that needs a real key.
 
 ## Evidence
 

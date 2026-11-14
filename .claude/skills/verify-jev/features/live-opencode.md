@@ -4,6 +4,7 @@ The default backend, free OpenCode `jev-1.13-free` at `https://opencode.ai/zen/v
 
 ## Sub-features
 
+- `live-dry-run` a dry run of the live batch records reports status `free` and cost `"0"`, and sends nothing.
 - `live-noul` one classify with the version-1 file `noul.v1.json` returns `answers.billing.noul` in [0, 1] with the ID preserved.
 - `live-choice-batch` a two-line batch returns IDs in order and a full probability map over exactly the criteria labels, summing to 1 within 0.01.
 
@@ -18,7 +19,7 @@ Preconditions:
 - Doctor reports `opencode.ai resolves`.
 - Inputs are the synthetic records in `LIVE` in `verify.py`. Nothing else.
 
-- **All steps.** Run `python3 .claude/skills/verify-jev/verify.py run --live live-opencode`. Three requests total. Both steps print `PASS`.
+- **All steps.** Run `python3 .claude/skills/verify-jev/verify.py run --live live-opencode`. Three requests total; the dry-run step sends none. All three steps print `PASS`.
 - **Proof.** The transcript shows the real response, including `model: jev-1.13-free` and `usage.opencode.billing_source: free`.
 
 ## Gotchas

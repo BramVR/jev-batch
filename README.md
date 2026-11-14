@@ -40,6 +40,26 @@ Each output is `{ "id": <input id>, ...<full API response> }`. It includes `mode
 
 Requests run sequentially, with `--timeout 60` seconds per request. No automatic retries. On the first invalid record or API failure, exit 1; previous successful JSONL lines remain valid and flushed. Batch stderr identifies the failed line; it omits private HTTP bodies. Resume from that line explicitly after resolving the error, or rerun the full input with `--cache` so finished records send nothing. CLI argument errors exit 2. Help and successful runs exit 0.
 
+### Dry run
+
+Price a run before sending it. `--dry-run` works with `classify` and `batch`. It validates questions, backend, and every record exactly as a real run does, then prints one JSON report to stdout. It sends no request and reads no TypeSafe key or Keychain entry:
+
+```sh
+python3 jev.py batch --dry-run --questions questions.json \
+  --base-url https://api.typesafe.ai/v1 --model jev-1.14.0 < records.jsonl
+```
+
+The report names the backend endpoint and model and lists each record's `id`, its exact `request_bytes`, and estimated input, question, and state tokens. Batch rows also carry the input `line`. It totals the input estimates and gives `estimated_cost_usd` as a decimal string. A batch with an invalid line exits 1 with the usual `batch stopped at line N` error and prints no report.
+
+Token counts are estimates, not tokenizer counts. The rule is `ceil(bytes / 4)` over the exact UTF-8 request body a send would POST, built by the same serializer. That body is ASCII-escaped JSON, so each non-ASCII character counts as its `\uXXXX` escape (6 bytes, 12 for emoji). It includes the model, state, questions, and JSON syntax. The rule is deterministic. Real tokenizers can count differently.
+
+Prices were read 2026-11-14 as input USD per million tokens. The source pages show `$` without a currency code, so USD is assumed:
+
+- OpenCode Zen ([docs](https://opencode.ai/docs/zen)) lists `jev-1.13-free` at 0 and `jev-1.13` at 0.042.
+- TypeSafe ([models](https://docs.typesafe.ai/models)) lists `jev-1.14.0`, `jev-1.13.0`, `jev-latest`, and `jev-preview` at 0.042, for the HTTPS origin only.
+
+`--dry-run` ignores `--cache`: it reads and writes no entry and prices every record as if sent, so the estimate is an upper bound for a cached rerun. Output tokens are not estimated. Both sources list them as free. Any other host or model reports price status `unknown` and a `null` price and cost, never a guess. Image `assets` count toward `request_bytes` but are excluded from token estimates. Such records are flagged `assets_not_estimated`, and the run's cost is `null`.
+
 ## Cache responses
 
 Caching is off by default. Pass `--cache DIR` to `classify` or `batch` to reuse successful responses:
@@ -106,7 +126,7 @@ Output is one JSON object:
 
 Read calibration bucket by bucket. When `accuracy` sits near `mean_confidence`, the stated confidence matches observed correctness. Accuracy below mean confidence means overconfidence. Small counts make a bucket noise; compare buckets only with enough labeled examples.
 
-Duplicate IDs in either file, a label outside the criteria keys, an empty labels file, malformed or blank lines, and a missing `--labels` exit 1 with no report. Errors name the file and line. Empty predictions report zero scored rows. Eval sends no requests, so `--cache` is rejected with eval.
+Duplicate IDs in either file, a label outside the criteria keys, an empty labels file, malformed or blank lines, and a missing `--labels` exit 1 with no report. Errors name the file and line. Empty predictions report zero scored rows. Eval sends no requests, so `--cache` and `--dry-run` are rejected with eval.
 
 ## Run the session demo
 

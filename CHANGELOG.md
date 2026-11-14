@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `--dry-run` to classify and batch: validate, then report labelled input-token estimates and dated USD cost per backend/model, with no credential reads or HTTP; unknown prices stay null.
+
 - Add offline `eval` that scores saved batch results for one Choice question against hand-labeled JSONL, reporting accuracy, a labeled confusion matrix, and ten fixed calibration buckets with scored and unscored denominators.
 
 - Add opt-in `--cache DIR` that stores validated responses keyed by endpoint and exact request body, so reruns and resumed batches send only missing records; the session demo caches under `.private/demo/cache`.

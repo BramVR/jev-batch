@@ -5,6 +5,7 @@ import argparse
 from collections import Counter
 import contextlib
 from dataclasses import dataclass, field
+from decimal import Decimal
 import http.client
 import io
 import itertools
@@ -29,7 +30,7 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "f03a020c0c7fb9fa75b0b89ece7fdf3cb5368a41",
+    "jev.py": "1131bd1990f2a7898f431a0f1f108681db2a7781",
     "scripts/demo_sessions.py": "5a45729868d435be631d5df31262a2218e158fb8",
 }
 KEY = "sentinel-key-not-real"
@@ -215,6 +216,31 @@ def check_batch(c, depth):
                     c.fail("batch-blames-right-party", case, f"API failure reported as {run.stderr.strip()!r}")
             if SECRET_BODY in run.stderr + run.stdout:
                 c.fail("batch-no-body-leak", case, "HTTP or response body echoed")
+            check_batch_dry_run(c, questions, seq, lines, stages)
+
+
+def check_batch_dry_run(c, questions, seq, lines, stages):
+    run = drive(c.jev, ["batch", "--dry-run", "--questions", questions], "\n".join(lines) + "\n",
+                respond=lambda index, request: json.dumps(ok_response(index)).encode())
+    c.cases += 1
+    case = "batch --dry-run " + ",".join(seq)
+    if not c.clean_exit("dry-run-clean-exit", case, run):
+        return
+    if run.requests or run.key_reads:
+        c.fail("dry-run-no-network-no-credentials", case, f"{len(run.requests)} requests, {run.key_reads} key reads")
+    k = next((i for i, s in enumerate(stages) if s == "local"), len(seq))
+    if k < len(seq):
+        prefix = f"jev: batch stopped at line {k + 1}; "
+        if run.code != 1 or run.stdout or not run.stderr.startswith(prefix) or run.stderr.count("\n") != 1:
+            c.fail("dry-run-batch-exit", case, f"exit {run.code} stdout {run.stdout[:80]!r} stderr {run.stderr!r}")
+        return
+    report = json.loads(run.stdout) if run.code == 0 and run.stdout.count("\n") == 1 else {}
+    rows = report.get("records", [])
+    if run.stderr or not (len(rows) == len(lines) and all(
+            row["line"] == i + 1 and same(row["id"], json.loads(line)["id"]) for i, (row, line) in enumerate(zip(rows, lines)))):
+        c.fail("dry-run-batch-report", case, f"exit {run.code} stderr {run.stderr!r} stdout {run.stdout[:120]!r}")
+    elif report["total_input_tokens_estimate"] != sum(row["input_tokens_estimate"] for row in rows):
+        c.fail("dry-run-total-is-sum", case, f"total {report['total_input_tokens_estimate']}")
 
 
 # P2. Request shape and credential isolation for every backend, question set, and record in scope.
@@ -274,6 +300,7 @@ def check_requests(c):
         response = {"answers": {}, "model": model}
         run = drive(c.jev, ["classify", "--questions", c.questions_file(questions), "--base-url", base,
                             "--model", model, "--timeout", "7"], raw, env, lambda i, r: json.dumps(response).encode())
+        check_request_dry_run(c, case, base, model, questions, raw, env, run)
         if not c.clean_exit("request-clean-exit", case, run):
             continue
         record = json.loads(raw)
@@ -321,6 +348,57 @@ def check_requests(c):
         for prop, ok in checks.items():
             if not ok:
                 c.fail(prop, case, f"headers {dict(r.header_items())} stdout {run.stdout[:120]!r}")
+
+
+# P2b. Dry run: same local verdict as a real send, no credentials or network, README estimator and price table.
+
+# README "Dry run" prices, restated independently of jev.PRICES for the models in MODELS.
+DRY_RUN_PRICES = {("opencode.ai", "jev-1.13-free"): "0", (TYPESAFE_HOST, "jev-1.14.0"): "0.042"}
+
+
+def readme_estimate(value):
+    return -(-len(json.dumps(value).encode("utf-8")) // 4)
+
+
+def check_request_dry_run(c, case, base, model, questions, raw, env, real):
+    run = drive(c.jev, ["classify", "--dry-run", "--questions", c.questions_file(questions), "--base-url", base,
+                        "--model", model], raw, env, lambda i, r: b'{"answers":{}}')
+    c.cases += 1
+    case = case.replace("request ", "request --dry-run ", 1)
+    if not c.clean_exit("dry-run-clean-exit", case, run):
+        return
+    if run.requests or run.key_reads:
+        c.fail("dry-run-no-network-no-credentials", case, f"{len(run.requests)} requests, {run.key_reads} key reads")
+    # A send's missing-key failure is a credential step, which dry run skips by contract.
+    missing_key = real.stderr.startswith("jev: missing TYPESAFE_API_KEY")
+    if not real.crash and not missing_key and (run.code, run.stderr) != (real.code, real.stderr):
+        c.fail("dry-run-validates-like-send", case, f"dry exit {run.code} {run.stderr!r}, send exit {real.code} {real.stderr!r}")
+    if run.code != 0:
+        if run.stdout:
+            c.fail("dry-run-validates-like-send", case, f"stdout on rejection {run.stdout[:80]!r}")
+        return
+    record = json.loads(raw)
+    report = json.loads(run.stdout)
+    row, = report["records"]
+    text_body = {"model": model, "state": record["state"], "questions": questions}
+    tokens = readme_estimate(text_body)
+    if not same(row["id"], record["id"]) or row["input_tokens_estimate"] != tokens \
+            or report["total_input_tokens_estimate"] != tokens:
+        c.fail("dry-run-tokens", case, f"row {row} expected {tokens} tokens over body without assets")
+    sent = [r["request"].data for r in real.requests]
+    if len(sent) == 1 and row["request_bytes"] != len(sent[0]):
+        c.fail("dry-run-measures-sent-bytes", case, f"request_bytes {row['request_bytes']} != {len(sent[0])} bytes sent")
+    scheme, host = urllib_target(base)
+    if host == TYPESAFE_HOST and scheme != "https":
+        host = None
+    price = DRY_RUN_PRICES.get((host, model))
+    cost = None if price is None or "assets" in record else Decimal(price) * tokens / 1000000
+    got = report["estimated_cost_usd"]
+    pricing = report["pricing"]
+    if pricing["input_usd_per_million_tokens"] != price or (got is None) != (cost is None) \
+            or (cost is not None and Decimal(got) != cost) \
+            or pricing["status"] != ("unknown" if price is None else "free" if Decimal(price) == 0 else "priced"):
+        c.fail("dry-run-cost", case, f"pricing {pricing} cost {got!r}, expected price {price!r} cost {cost!r}")
 
 
 # P3. Probabilities and numbers pass through bit for bit; nonfinite values never reach stdout.
@@ -408,6 +486,7 @@ def check_question_files(c):
                     respond=lambda i, r: json.dumps(ok_response(i)).encode())
         if not c.clean_exit("questions-clean-exit", case, run):
             continue
+        check_question_file_dry_run(c, case, command, document, run)
         expected = None if isinstance(document, bytes) else expected_questions(document)
         if (run.code == 0) != (expected is not None):
             c.fail("questions-accept-iff-valid", case, f"exit {run.code} stderr {run.stderr[:120]!r}")
@@ -805,6 +884,26 @@ def check_cache(c, depth):
                 if not (len(got) == len(expected_out) and all(map(same, got, expected_out))):
                     c.fail("cache-resume-output", case, f"{attempt}: stdout {run.stdout[:200]!r}")
 
+    for base, model, questions, raw in configs:
+        c.cases += 1
+        case = f"cache --dry-run base={base} model={model} questions={sorted(questions)} record={raw[:40]}"
+        cache = c.tmp / "cache-dry"
+        shutil.rmtree(cache, ignore_errors=True)
+        argv = ["classify", "--questions", c.questions_file(questions), "--base-url", base, "--model", model]
+        cold = drive(c.jev, [*argv, "--dry-run", "--cache", str(cache)], raw, respond=responses)
+        created = cache.exists()
+        drive(c.jev, [*argv, "--cache", str(cache)], raw, respond=responses)
+        before = {p: p.read_bytes() for p in cache_entries(cache)}
+        warm = drive(c.jev, [*argv, "--dry-run", "--cache", str(cache)], raw, respond=responses)
+        plain = drive(c.jev, [*argv, "--dry-run"], raw, respond=responses)
+        if not all(c.clean_exit("dry-run-clean-exit", case, r) for r in (cold, warm, plain)):
+            continue
+        after = {p: p.read_bytes() for p in cache_entries(cache)}
+        if created or after != before or cold.requests or warm.requests \
+                or (cold.code, cold.stdout) != (plain.code, plain.stdout) or (warm.code, warm.stdout) != (plain.code, plain.stdout):
+            c.fail("dry-run-ignores-cache", case, f"cache created={created} changed={after != before}, "
+                   f"stdout cold={cold.stdout[:60]!r} warm={warm.stdout[:60]!r} plain={plain.stdout[:60]!r}")
+
 
 # P7. Eval: offline, exact report against an independent oracle, hard errors for ambiguous input.
 
@@ -910,6 +1009,8 @@ EVAL_ERRORS = [
     (['{"id":"x","label":"a"}'], [], ("--question", "zz"), "jev: eval needs --question naming a Choice question"),
     (['{"id":"x","label":"a"}'], [], ("--question", "r", "--cache", "eval-cache-never-created"),
      "jev: eval sends no requests; --cache is for classify and batch"),
+    (['{"id":"x","label":"a"}'], [], ("--question", "r", "--dry-run"),
+     "jev: eval sends no requests; --dry-run is for classify and batch"),
 ]
 
 
@@ -950,11 +1051,29 @@ def check_eval(c):
             c.fail("eval-errors", case, f"exit {run.code} stdout {run.stdout[:80]!r} stderr {run.stderr!r}")
 
 
+def check_question_file_dry_run(c, case, command, document, real):
+    c.cases += 1
+    case = case.replace("questions ", "questions --dry-run ", 1)
+    run = drive(c.jev, [command, "--dry-run", "--questions", c.questions_file(document)], '{"id":"q","state":"x"}\n',
+                respond=lambda i, r: json.dumps(ok_response(i)).encode())
+    if not c.clean_exit("dry-run-clean-exit", case, run):
+        return
+    if run.requests or (run.code, run.stderr) != (real.code, real.stderr) or (run.code != 0 and run.stdout):
+        c.fail("dry-run-questions-like-send", case, f"dry exit {run.code} {run.stderr!r}, send exit {real.code} {real.stderr!r}")
+        return
+    if run.code == 0:
+        row, = json.loads(run.stdout)["records"]
+        questions = json.loads(real.requests[0]["request"].data)["questions"]
+        if row["request_bytes"] != len(real.requests[0]["request"].data) \
+                or row["question_tokens_estimate"] != readme_estimate(questions):
+            c.fail("dry-run-questions-like-send", case, f"row {row} vs sent body of {len(real.requests[0]['request'].data)} bytes")
+
+
 # Broken variants of jev.py. Each must make the named property fail, or the check proves nothing.
 
 MUTANTS = [
     ("batch keeps going after a failure", "batch-prefix",
-     [("                    return 1\n                print(", "                    continue\n                print(")]),
+     [("                    return 1\n                if args.dry_run:", "                    continue\n                if args.dry_run:")]),
     ("batch output not flushed per line", "batch-flush-before-next",
      [("allow_nan=False), flush=True)", "allow_nan=False))")]),
     ("TypeSafe origin matched by substring", "auth-only-to-typesafe",
@@ -969,7 +1088,7 @@ MUTANTS = [
      [("    json.dumps(value, allow_nan=False)\n    return value", "    return value"),
       ("allow_nan=False", "allow_nan=True")]),
     ("images header only for assets", "images-header-iff-images",
-     [('if "assets" in record or any(q["type"] == "box" for q in questions.values()):', 'if "assets" in record:')]),
+     [('    if uses_images(payload):\n        headers', '    if "assets" in payload:\n        headers')]),
     ("free backend accepts Box", "box-rejected-locally-on-free",
      [('        return not (urlsplit(self.base_url).hostname == "opencode.ai"',
        '        return True or not (urlsplit(self.base_url).hostname == "opencode.ai"')]),
@@ -1034,6 +1153,34 @@ MUTANTS = [
      [('            with args.labels.open(encoding="utf-8") as labels:',
        '            args.labels.write_text(args.labels.read_text(encoding="utf-8") + " ", encoding="utf-8")\n'
        '            with args.labels.open(encoding="utf-8") as labels:')]),
+    ("dry run reads credentials", "dry-run-no-network-no-credentials",
+     [("api_key() if backend.typesafe and not args.dry_run else None", "api_key() if backend.typesafe else None")]),
+    ("dry run also sends", "dry-run-no-network-no-credentials",
+     [("                return estimate(record, questions, backend)",
+       "                return [classify(record, questions, key, backend, args.timeout), "
+       "estimate(record, questions, backend)][1]")]),
+    ("dry run skips record validation", "dry-run-validates-like-send",
+     [("    payload = request_payload(record, questions, backend)\n    text = ",
+       "    payload = dict(record, questions=questions)\n    text = ")]),
+    ("dry run prices unknown backends at zero", "dry-run-cost",
+     [("return PRICES.get((host, self.model))", 'return PRICES.get((host, self.model), ("0", None))')]),
+    ("dry run counts image assets as text", "dry-run-tokens",
+     [('payload.items() if key != "assets"}', "payload.items()}")]),
+    ("dry run measures unescaped JSON", "dry-run-measures-sent-bytes",
+     [('"request_bytes": len(request_body(payload))',
+       '"request_bytes": len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))')]),
+    ("dry run measures the questions wrapper", "dry-run-questions-like-send",
+     [('"question_tokens_estimate": estimate_tokens(questions)',
+       '"question_tokens_estimate": estimate_tokens({"schema_version": 1, "questions": questions})')]),
+    ("dry run writes the cache", "dry-run-ignores-cache",
+     [("                return estimate(record, questions, backend)",
+       "                cache and cache.store(cache.path(backend.endpoint, request_body(request_payload(record, questions, backend))), {\"answers\": {}})\n"
+       "                return estimate(record, questions, backend)")]),
+    ("eval accepts --dry-run and ignores it", "eval-errors",
+     [('        if args.command == "eval" and args.dry_run:\n', '        if False:\n')]),
+    ("dry run total drops a batch row", "dry-run-total-is-sum",
+     [('total = sum(row["input_tokens_estimate"] for row in rows)',
+       'total = sum(row["input_tokens_estimate"] for row in rows[1:]) or rows[0]["input_tokens_estimate"]')]),
 ]
 
 # Broken variants of scripts/demo_sessions.py, checked the same way.
@@ -1073,6 +1220,8 @@ KNOWN_FINDINGS = {
     "F2 batch blames the record for API response failures":
         lambda prop, case: prop == "batch-blames-right-party"
         and any(k in case for k in ("resp_not_json", "resp_not_utf8", "resp_infinity")),
+    "F3 control character in --base-url gets a TypeSafe dry-run price for a non-TypeSafe urllib target":
+        lambda prop, case: prop == "dry-run-cost" and ("\\n" in case or "\\t" in case),
 }
 
 
@@ -1093,8 +1242,13 @@ SECTIONS = {"batch": "batch", "numbers": "numbers", "questions": "questions", "c
             "redact": "redaction", "demo": "redaction"}
 
 
+# Properties checked outside the section their prefix names; a mutant must run where its property is checked.
+PROPERTY_SECTIONS = {"dry-run-questions-like-send": "questions", "dry-run-ignores-cache": "cache",
+                     "dry-run-total-is-sum": "batch", "dry-run-batch-exit": "batch", "dry-run-batch-report": "batch"}
+
+
 def section_of(prop):
-    return SECTIONS.get(prop.split("-", 1)[0], "requests")
+    return PROPERTY_SECTIONS.get(prop) or SECTIONS.get(prop.split("-", 1)[0], "requests")
 
 
 def triage(violations):
