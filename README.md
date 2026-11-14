@@ -97,6 +97,38 @@ Before any HTTP request, the CLI exits 1 on unreadable or invalid JSON, nonfinit
 
 Only the `questions` mapping is sent. `schema_version` describes the file format. It is never sent and is not part of a question set's identity. Wrapping a legacy file in version 1 changes nothing the API sees, and any change to question content changes every request. The `--cache` key uses the unwrapped mapping, never the file path or `schema_version`, so a version-1 file and its legacy equivalent share cache entries.
 
+## Chunk long text
+
+Jev's documented default limits are 32k tokens per question and 64k per request. Without `--chunk-tokens`, the CLI sends state unchanged and performs no context check. Opt in to chunking for long string state:
+
+```sh
+python3 jev.py batch --questions questions.json --chunk-tokens 30000 < records.jsonl
+```
+
+`N` is the estimated token budget for one request, at most 32000, including question overhead. The state capacity per chunk is `N - 512 - utf8_bytes(questions JSON)`, measured on the unwrapped mapping that is sent, so a version-1 file and its legacy mapping chunk identically. The 512-token allowance for the model name, request framing, and server-side prompt is a guess, not a documented value. Every question shares each request, so a budget under 32k also keeps requests under 64k. A budget that leaves fewer than 4 bytes for state is rejected.
+
+Tokens are estimated as UTF-8 bytes. That is an upper bound only for byte-level BPE tokenizers, where each token spans at least one byte. Jev's tokenizer is not documented, so the bound is an assumption. English text uses roughly a quarter of its estimate, which makes chunks smaller and more numerous than necessary.
+
+State whose estimate fits the capacity, including empty state, keeps the existing single-request behavior and output. Longer state is split into consecutive chunks with no overlap at code-point boundaries, so a chunk boundary can split a word or sentence. Each chunk is one request with the same questions. The final record is:
+
+```json
+{"id": "<input id>",
+ "answers": {"route": {"type": "choice", "choice": "b", "confidence": 0.5625, "probabilities": {"a": 0.4375, "b": 0.5625}}},
+ "aggregation": {"method": "mean", "weights": "equal", "tie_break": "criteria order", "confidence": "mean probability of chosen label"},
+ "chunking": {"token_budget": 30000, "state_capacity": 29425, "estimator": "utf8-bytes", "overlap": 0, "count": 2},
+ "chunks": [{"index": 0, "start": 0, "end": 29425, "estimated_tokens": 29425, "response": {"...": "full API response"}}]}
+```
+
+Each label's aggregate probability is the equal-weight mean of that label's probabilities across chunks, computed exactly with `fractions.Fraction` and rounded to a float once. The choice is the label with the highest exact mean, so near-equal labels are not decided by float rounding. Exact ties go to the label listed first in the question's `criteria`. Aggregate `confidence` is the mean probability of the chosen label. It is not the mean of per-chunk API `confidence` values. `start` and `end` are character offsets into the original state. Every chunk's full API response, including `model` and `usage`, stays in `chunks` for audit.
+
+The mean is a heuristic. A label strongly present in one chunk and absent from the rest is diluted, and chunks are judged without each other's context. Inspect `chunks` before trusting an aggregate.
+
+The first slice supports only Choice questions with `criteria` objects and string state without `assets`. Other question types, object or array state, and out-of-range budgets exit 1 before any request. Text is never truncated. If any chunk request fails, returns invalid JSON, or answers without probabilities for exactly the criteria labels, the record fails with the chunk number. No later chunk is sent and no aggregate is printed. Each chunk request gets the same `--retries` policy as any request, and the chunk number names only the attempt that finally failed. Earlier chunk requests for that record were already sent and billed. Batch stops at that line as usual. In batch, `--concurrency` counts records: the chunks of one record are sent one after another, so requests in flight never exceed `--concurrency`.
+
+With `--cache`, each chunk request is cached on its own, keyed like any other request. A rerun after a failed chunk sends only the chunks that never succeeded, and an identical rerun sends nothing. Identical chunk text within a record hits the same entry. A chunk answer rejected for its labels is never cached, so the rerun asks again.
+
+`--dry-run --chunk-tokens N` prices the chunked requests: a row for a chunked record carries `chunks` and the sums of its chunk requests' bytes and token estimates, so question tokens count once per chunk. Records that fit keep the plain row. `eval` and `summarize` reject `--chunk-tokens`. `summarize` reads chunked output unchanged, because each record's aggregated `answers` keep the Choice shape.
+
 ## Summarize results
 
 Summarize saved batch output offline. It reads no credentials and makes no network calls:
@@ -124,7 +156,7 @@ Question objects in the mapping pass through to the API, which validates their d
 - `score` uses `criteria` as an ordered array of level descriptions, indexed from zero. Answers include `score`, `legend`, `confidence`, and `probabilities`.
 - `noul` asks a yes/no question through `instructions`, with optional `criteria.true` and `criteria.false`. Answers contain `noul`, the probability of yes.
 
-Instructions and descriptions can be strings, objects, or arrays where documented. Free OpenCode and Jev 1.13 reject Box questions and image assets locally. With a supporting backend and model, Box questions pass through with optional record `assets` containing image `type`, `format`, and `data_base64`. The CLI automatically sends `TypeSafe-Danger-Zone-Images: true` for assets or Box questions. Box answers retain coordinates and confidence. Multipart, long-context headers, and packaging are outside this version.
+Instructions and descriptions can be strings, objects, or arrays where documented. Free OpenCode and Jev 1.13 reject Box questions and image assets locally. With a supporting backend and model, Box questions pass through with optional record `assets` containing image `type`, `format`, and `data_base64`. The CLI automatically sends `TypeSafe-Danger-Zone-Images: true` for assets or Box questions. Box answers retain coordinates and confidence. Multipart, long-context headers, chunking beyond Choice text, and packaging are outside this version.
 
 Contracts checked 2026-11-14 against [models](https://docs.typesafe.ai/models), [System One](https://docs.typesafe.ai/api/system-one), [Choice](https://docs.typesafe.ai/primitives/choice), [Score](https://docs.typesafe.ai/primitives/score), [Noul](https://docs.typesafe.ai/primitives/noul), [Box](https://docs.typesafe.ai/primitives/box), and [OpenAPI](https://api.typesafe.ai/openapi.json). Jev's documented default limits are 64k tokens per request and 32k per question. Keep transcripts bounded.
 
@@ -202,7 +234,7 @@ git diff --check
 
 Tests mock HTTP at the CLI boundary, checking request shape/auth, complete responses, failures, retries and backoff, the concurrency bound, partial batch output, and credential selection. Eval tests check the example fixture's exact metrics through a fresh process, edge cases, and that eval sends nothing and reads no credentials. No live API credential is required for tests. Summarize tests run the CLI on synthetic result files.
 
-Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI and the session demo against a loopback System One stub, with an opt-in `--live` journey of three synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, retry policy and backoff, batch order, window, and concurrency invariants, question-file versioning, response cache identity and resume, and demo redaction over bounded inputs, and proves each check can fail on a broken `jev.py` or demo script:
+Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI and the session demo against a loopback System One stub, with an opt-in `--live` journey of six synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, retry policy and backoff, batch order, window, and concurrency invariants, question-file versioning, response cache identity and resume, and demo redaction over bounded inputs, and proves each check can fail on a broken `jev.py` or demo script:
 
 ```sh
 python3 .claude/skills/verify-jev/verify.py run

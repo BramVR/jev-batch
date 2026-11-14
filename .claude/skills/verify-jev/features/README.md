@@ -6,7 +6,7 @@ The maintained source for verifying what a jev-cli user can observe. Read this i
 
 - `python3 .claude/skills/verify-jev/verify.py doctor` exits 0.
 - Each journey runs on a fresh copy under `.private/verify/<run-id>/build` with env reduced to `PATH`, `HOME`, `LANG`, plus what the step sets.
-- Fixture files (`noul.json`, `choice.json`, `box.json`, `empty.json`, `weird.json`, `record.json`, `results.jsonl`, `mixed.json`, plus the question-file fixtures `noul.v1.json`, `choice.v1.json`, `v2.json`, `extra.v1.json`, `empty.v1.json`, `broken.json`, and eval's `labels.jsonl`, `dup-labels.jsonl`, `bad-labels.jsonl`) are written into the run's `work/` dir, which is the CLI's cwd. The same dir is `HOME` and holds one synthetic `.codex/sessions/synthetic.jsonl` for the demo journey.
+- Fixture files (`noul.json`, `choice.json`, `box.json`, `score.json`, `empty.json`, `weird.json`, `record.json`, `results.jsonl`, `mixed.json`, plus the question-file fixtures `noul.v1.json`, `choice.v1.json`, `v2.json`, `extra.v1.json`, `empty.v1.json`, `broken.json`, and eval's `labels.jsonl`, `dup-labels.jsonl`, `bad-labels.jsonl`) are written into the run's `work/` dir, which is the CLI's cwd. The same dir is `HOME` and holds one synthetic `.codex/sessions/synthetic.jsonl` for the demo journey.
 - Offline journeys reach System One only through the loopback stub via `--base-url` or `JEV_BASE_URL`.
 
 ## Driving conventions
@@ -32,5 +32,6 @@ The maintained source for verifying what a jev-cli user can observe. Read this i
 - [Response cache](./cache.md) covers `--cache` reruns with zero requests, misses on changed requests, resume after interrupt, and failed or corrupt entries.
 - [Backend selection](./backend-select.md) covers env and flag precedence, Box gating, and credential isolation.
 - [Demo redaction](./demo-redaction.md) covers `scripts/demo_sessions.py` redaction before save and before send, the old-sample second pass, opt-out, and the sample limit.
+- [Chunked Choice text](./chunk.md) covers `--chunk-tokens` splitting, mean aggregation, tie-break, Unicode, failed and retried chunks, per-chunk caching, concurrency, dry-run pricing, and guards.
 - [Dry run](./dry-run.md) covers offline token and cost estimates, unknown prices, and validation without credentials or requests.
-- [Live OpenCode](./live-opencode.md) covers three synthetic requests to the free default backend.
+- [Live OpenCode](./live-opencode.md) covers four synthetic records, six requests, to the free default backend.
