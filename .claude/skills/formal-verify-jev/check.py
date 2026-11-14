@@ -357,9 +357,7 @@ DRY_RUN_PRICES = {("opencode.ai", "jev-1.13-free"): "0", (TYPESAFE_HOST, "jev-1.
 
 
 def readme_estimate(value):
-    text = json.dumps(value, ensure_ascii=False)
-    ascii_chars = sum(1 for ch in text if ord(ch) < 128)
-    return -(-ascii_chars // 4) + len(text) - ascii_chars
+    return -(-len(json.dumps(value).encode("utf-8")) // 4)
 
 
 def check_request_dry_run(c, case, base, model, questions, raw, env, real):
@@ -387,6 +385,9 @@ def check_request_dry_run(c, case, base, model, questions, raw, env, real):
     if not same(row["id"], record["id"]) or row["input_tokens_estimate"] != tokens \
             or report["total_input_tokens_estimate"] != tokens:
         c.fail("dry-run-tokens", case, f"row {row} expected {tokens} tokens over body without assets")
+    sent = [r["request"].data for r in real.requests]
+    if len(sent) == 1 and row["request_bytes"] != len(sent[0]):
+        c.fail("dry-run-measures-sent-bytes", case, f"request_bytes {row['request_bytes']} != {len(sent[0])} bytes sent")
     scheme, host = urllib_target(base)
     if host == TYPESAFE_HOST and scheme != "https":
         host = None
@@ -1124,6 +1125,9 @@ MUTANTS = [
      [("return PRICES.get((host, self.model))", 'return PRICES.get((host, self.model), ("0", None))')]),
     ("dry run counts image assets as text", "dry-run-tokens",
      [('payload.items() if key != "assets"}', "payload.items()}")]),
+    ("dry run measures unescaped JSON", "dry-run-measures-sent-bytes",
+     [('"request_bytes": len(request_body(payload))',
+       '"request_bytes": len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))')]),
     ("dry run total drops a batch row", "dry-run-total-is-sum",
      [('total = sum(row["input_tokens_estimate"] for row in rows)',
        'total = sum(row["input_tokens_estimate"] for row in rows[1:]) or rows[0]["input_tokens_estimate"]')]),
