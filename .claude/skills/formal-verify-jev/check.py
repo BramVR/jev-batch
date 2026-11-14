@@ -11,6 +11,7 @@ import itertools
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -501,23 +502,36 @@ def check_redaction(c):
             c.fail("redact-benign-unchanged", repr(pre + text + post), dict(counts))
 
 
+# Oracle's own label map, written out rather than read from the code under test.
+LABEL_RULES = {"private_key": "private_key", "bearer": "bearer", "token": "token", "secret": "assignment",
+               "email": "email", "home": "home_path"}
+
+
 def check_redact_before_cap(c):
     home = c.tmp / "home"
     sessions = home / ".codex/sessions"
     sessions.mkdir(parents=True, exist_ok=True)
     for rule, text, part in SECRETS:
-        for cut in range(1, len(text)):
+        # cut 0: wholly past the cap; 1..len-1: straddles it; -500: wholly kept.
+        for cut in [-500, *range(0, len(text))]:
             c.cases += 1
-            message = "x" * (3999 - cut) + " " + text
+            message = "x" * (3999 - max(cut, 0) - (500 if cut < 0 else 0)) + " " + text
             (sessions / "s.jsonl").write_text("".join(json.dumps(x) + "\n" for x in (
                 {"type": "session_meta", "payload": {"id": "s", "cwd": "/elsewhere"}},
                 {"type": "response_item", "payload": {"type": "message", "role": "user",
                                                       "content": [{"type": "input_text", "text": message}]}})))
+            counts = Counter()
             with patch.dict(os.environ, {"HOME": str(home)}):
-                saved = json.dumps(c.demo.prepare_sample(1, Counter()))
+                records = c.demo.prepare_sample(1, counts)
+            saved = json.dumps(records)
+            case = f"{text!r} with {cut} chars before the cap"
             leaked = [part[i:i + 6] for i in range(len(part) - 5) if part[i:i + 6] in saved]
             if leaked:
-                c.fail("redact-before-cap", f"{text!r} cut after {cut} chars", leaked[0])
+                c.fail("redact-before-cap", case, leaked[0])
+            kept = Counter(LABEL_RULES[label] for m in records[0]["state"]["messages"]
+                           for label in re.findall(r"\[REDACTED:(\w+)\]", m["text"]) if label in LABEL_RULES)
+            if counts != kept or (cut < 0 and counts != {rule: 1}) or (cut == 0 and counts):
+                c.fail("redact-counts-kept", case, f"counts {dict(counts)}, saved placeholders {dict(kept)}")
 
 
 def drive_demo(c, argv, sample_lines):
@@ -534,9 +548,15 @@ def drive_demo(c, argv, sample_lines):
     before = sample.read_bytes() if sample.exists() else None
     sent = []
 
-    def send(command, input=None, stdout=None, **kwargs):
-        sent.append(input)
-        for line in input.splitlines():
+    def send(command, input=None, stdout=None, encoding=None, env=None, **kwargs):
+        # Model a hostile locale: anything not pinned to UTF-8 on either side of the pipe is ASCII.
+        try:
+            received = input.encode(encoding or "ascii").decode((env or {}).get("PYTHONIOENCODING") or "ascii")
+        except UnicodeError:
+            sent.append(None)
+            return types.SimpleNamespace(returncode=1, stderr="jev: could not read input, credentials, or API JSON")
+        sent.append(received)
+        for line in received.splitlines():
             stdout.write(json.dumps({"id": json.loads(line)["id"], "answers": {"failure_pattern": {"choice": "fine"}}}) + "\n")
         return types.SimpleNamespace(returncode=0, stderr="")
 
@@ -557,19 +577,24 @@ def drive_demo(c, argv, sample_lines):
 
 
 def check_demo_send(c):
-    raw = [{"id": f"user{i}@example.test", "state": {"messages": [{"role": "user", "text": t}]}}
+    raw = [{"id": f"user{i}@example.test", "state": {"messages": [{"role": "user", "text": "café ✓ " + t}]}}
            for i, (_, t, _) in enumerate(SECRETS)]
     for opt_out in (False, True):
         c.cases += 1
         argv = ["--send", "--limit", "20"] + (["--no-redact"] if opt_out else [])
         code, sent, kept, output = drive_demo(c, argv, raw)
         case = " ".join(argv)
+        if sent == [None]:
+            c.fail("demo-send-utf8", case, "non-ASCII sample could not cross the pipe to jev.py")
+            continue
         if code != 0 or len(sent) != 1:
             c.fail("demo-send-clean-exit", case, f"exit {code}, {len(sent)} sends")
             continue
         if not kept:
             c.fail("demo-send-sample-unchanged", case, "sample bytes changed")
         lines = [json.loads(x) for x in sent[0].splitlines()]
+        if [r["state"]["messages"][0]["text"][:7] for r in lines] != ["café ✓ "] * len(raw):
+            c.fail("demo-send-utf8", case, "non-ASCII text changed on the way to jev.py")
         if [r["id"] for r in lines] != [r["id"] for r in raw]:
             c.fail("redact-id-kept", case, "outgoing ids differ from sample ids")
         leaked = [part for _, _, part in SECRETS if part in json.dumps([r["state"] for r in lines])]
@@ -639,8 +664,15 @@ DEMO_MUTANTS = [
      [('outgoing, summary["redaction"] = redact_records(records)',
        'outgoing, summary["redaction"] = records, {"policy": REDACTION_POLICY, "counts": {}}')]),
     ("redaction after the 4000-character cap", "redact-before-cap",
-     [("                        text = redact(text, hits)\n", "                        pass\n"),
-      ('"text": text[:4000]}', '"text": redact(text[:4000], hits)}')]),
+     [("                        text = redact(text, Counter())\n", "                        pass\n"),
+      ("                    text = text[:4000]\n", "                    text = redact(text[:4000], Counter())\n")]),
+    ("counts include matches past the cap", "redact-counts-kept",
+     [("text = redact(text, Counter())", "text = redact(text, early := Counter())"),
+      ("hits = Counter(RULE_BY_LABEL[label] for label in PLACEHOLDER.findall(text)) if counts", "hits = early if counts")]),
+    ("send pipe left to the locale encoding", "demo-send-utf8",
+     [('encoding="utf-8",', "text=True,")]),
+    ("jev.py stdio left to the locale encoding", "demo-send-utf8",
+     [('env={**os.environ, "PYTHONIOENCODING": "utf-8"}', "env=os.environ")]),
     ("arrays not recursed", "redact-no-fixture-survives",
      [("        return [redact(item, counts) for item in value]", "        return value")]),
     ("record id redacted", "redact-id-kept",

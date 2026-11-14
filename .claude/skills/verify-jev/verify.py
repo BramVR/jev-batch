@@ -110,6 +110,12 @@ def sample(build_dir):
     return (build_dir / ".private/demo/sample.jsonl").read_text()
 
 
+def write_unicode_sample(build_dir):
+    path = build_dir / ".private/demo/sample.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"id": "é-1", "state": "naïve café ✓"}, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def write_old_sample(build_dir):
     path = build_dir / ".private/demo/sample.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,6 +241,11 @@ def journeys(stub_url):
                  stdout=lambda o: json.loads(o)["redaction"] == {"policy": "disabled", "counts": {}},
                  requests=lambda r: len(r) == 1 and DEMO_SECRETS[3] in json.dumps(r[0]["body"]),
                  setup=write_old_sample),
+            Step("send is UTF-8 even when inherited stdio is ASCII", ["--send"], script="scripts/demo_sessions.py",
+                 env={"JEV_BASE_URL": base, "PYTHONIOENCODING": "ascii"}, stub=[ok(DEMO_RESPONSE)],
+                 setup=write_unicode_sample, stdout=lambda o: json.loads(o)["api_exit_code"] == 0,
+                 requests=lambda r: len(r) == 1 and r[0]["body"]["state"] == "naïve café ✓",
+                 files=lambda b: json.loads((b / ".private/demo/results.jsonl").read_text(encoding="utf-8"))["id"] == "é-1"),
             Step("--limit above 20 rejected before any request", ["--send", "--limit", "21"],
                  script="scripts/demo_sessions.py", env={"JEV_BASE_URL": base}, stub=[ok(DEMO_RESPONSE)], code=2,
                  stderr="--limit must be between 1 and 20", requests=lambda r: r == []),
