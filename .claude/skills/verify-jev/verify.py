@@ -26,6 +26,9 @@ NOUL = {"billing": {"type": "noul", "instructions": "Is this message about billi
 CHOICE = {"topic": {"type": "choice", "instructions": "Pick the topic of the message.",
                     "criteria": {"billing": "Payments, charges, invoices.", "bug": "Software defect.",
                                  "other": "Anything else."}}}
+SCORE = {"urgency": {"type": "score", "instructions": "How urgent?", "criteria": ["low", "high"]}}
+# README formula: state capacity = budget - 512 - utf8_bytes(questions JSON). Budget leaves 20 bytes of state.
+CHUNK_BUDGET = str(512 + len(json.dumps(CHOICE, ensure_ascii=False).encode()) + 20)
 BOX = {"logo": {"type": "box", "instructions": "Find the logo."}}
 ASSETS = {"shot": {"type": "image", "format": "png", "data_base64": "iVBORw0KGgo="}}
 EVAL_LABELS = "".join(json.dumps({"id": i, "label": v}) + "\n" for i, v in
@@ -120,6 +123,20 @@ class Stub:
 
 def ok(body=STUB_RESPONSE, delay=0):
     return (200, body, delay)
+
+
+def choice_reply(billing, bug, other):
+    return json.dumps({"model": "stub-model", "usage": {"input_tokens": 5},
+                       "answers": {"topic": {"type": "choice", "choice": "bug", "confidence": max(billing, bug, other),
+                                             "probabilities": {"billing": billing, "bug": bug, "other": other}}}})
+
+
+def chunked(state, sizes):
+    def check(reqs):
+        states = [r["body"]["state"] for r in reqs]
+        return ("".join(states) == state and [len(s.encode()) for s in states] == sizes
+                and all(r["body"]["questions"] == CHOICE for r in reqs))
+    return check
 
 
 def lines_json(out):
@@ -463,6 +480,102 @@ def journeys(stub_url):
                  '{"id":1,"answers":{"level":{"type":"score","score":2}}}\n', code=1,
                  stderr="jev: summarize stopped at line 1; 'level' is not a Choice answer", stdout=lambda o: o == ""),
         ],
+        "chunk": [
+            Step("small input keeps single-request output",
+                 ["classify", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET, *stub_args],
+                 '{"id":"small","state":"Charged twice"}', stub=[ok()],
+                 stdout=lambda o: o == '{"id": "small", ' + json.dumps(response)[1:] + "\n",
+                 requests=lambda r: [x["body"]["state"] for x in r] == ["Charged twice"]),
+            Step("oversized input split into bounded requests, one mean-aggregated record",
+                 ["classify", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET, *stub_args],
+                 '{"id":{"ticket":9},"state":"The app crashes when I save."}',
+                 stub=[ok(choice_reply(0.5, 0.25, 0.25)), ok(choice_reply(0.0, 0.75, 0.25))],
+                 stdout=lambda o: lines_json(o)[0]["id"] == {"ticket": 9}
+                 and lines_json(o)[0]["answers"] == {"topic": {"type": "choice", "choice": "bug", "confidence": 0.5,
+                     "probabilities": {"billing": 0.25, "bug": 0.5, "other": 0.25}}}
+                 and [c["response"] for c in lines_json(o)[0]["chunks"]]
+                 == [json.loads(choice_reply(0.5, 0.25, 0.25)), json.loads(choice_reply(0.0, 0.75, 0.25))]
+                 and [(c["start"], c["end"]) for c in lines_json(o)[0]["chunks"]] == [(0, 20), (20, 28)]
+                 and lines_json(o)[0]["chunking"]["state_capacity"] == 20,
+                 requests=chunked("The app crashes when I save.", [20, 8])),
+            Step("version-1 question file chunks like the legacy mapping",
+                 ["classify", "--questions", "choice.v1.json", "--chunk-tokens", CHUNK_BUDGET, *stub_args],
+                 '{"id":{"ticket":9},"state":"The app crashes when I save."}',
+                 stub=[ok(choice_reply(0.5, 0.25, 0.25)), ok(choice_reply(0.0, 0.75, 0.25))],
+                 stdout=lambda o: lines_json(o)[0]["chunking"]["state_capacity"] == 20
+                 and lines_json(o)[0]["answers"]["topic"]["choice"] == "bug",
+                 requests=chunked("The app crashes when I save.", [20, 8])),
+            Step("tie goes to first criteria label",
+                 ["classify", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET, *stub_args],
+                 '{"id":1,"state":"Refund the duplicate charge."}',
+                 stub=[ok(choice_reply(0.75, 0.25, 0.0)), ok(choice_reply(0.25, 0.75, 0.0))],
+                 stdout=lambda o: lines_json(o)[0]["answers"]["topic"]["choice"] == "billing"
+                 and lines_json(o)[0]["answers"]["topic"]["confidence"] == 0.5),
+            Step("Unicode split at code points within the byte budget",
+                 ["classify", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET, *stub_args],
+                 json.dumps({"id": "u", "state": "é" * 9 + "😀" * 3}, ensure_ascii=False),
+                 stub=[ok(choice_reply(0.5, 0.25, 0.25))] * 2,
+                 requests=chunked("é" * 9 + "😀" * 3, [18, 12])),
+            Step("batch mixes small and chunked lines",
+                 ["batch", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET, *stub_args],
+                 '{"id":"a","state":"short"}\n{"id":"b","state":"' + "x" * 41 + '"}\n', stub=[ok()] * 4,
+                 stdout=lambda o: [x["id"] for x in lines_json(o)] == ["a", "b"]
+                 and "chunks" not in lines_json(o)[0] and lines_json(o)[1]["chunking"]["count"] == 3,
+                 requests=lambda r: [len(x["body"]["state"]) for x in r] == [5, 20, 20, 1]),
+            Step("failed chunk fails the record, no aggregate",
+                 ["classify", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET, "--retries", "0", *stub_args],
+                 '{"id":1,"state":"The app crashes when I save."}',
+                 stub=[ok(choice_reply(0.5, 0.25, 0.25)), (500, SECRET_BODY, 0)], code=1,
+                 stderr="jev: chunk 2/2: System One HTTP 500; gave up after 1 attempt", stdout=lambda o: o == "",
+                 requests=lambda r: len(r) == 2),
+            Step("cached chunk run with a label-rejected second chunk",
+                 ["classify", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET, "--cache", "cache-k", *stub_args],
+                 '{"id":"k","state":"The app crashes when I save."}',
+                 stub=[ok(choice_reply(0.5, 0.25, 0.25)), ok('{"answers":{"topic":{"probabilities":{"bug":1}}}}')],
+                 code=1, stderr="jev: chunk 2/2: chunk answer probabilities", requests=lambda r: len(r) == 2),
+            Step("rerun resends only the rejected chunk",
+                 ["classify", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET, "--cache", "cache-k", *stub_args],
+                 '{"id":"k2","state":"The app crashes when I save."}', stub=[ok(choice_reply(0.0, 0.75, 0.25))],
+                 stdout=lambda o: lines_json(o)[0]["id"] == "k2" and lines_json(o)[0]["answers"]["topic"]["probabilities"]
+                 == {"billing": 0.25, "bug": 0.5, "other": 0.25},
+                 requests=lambda r: [x["body"]["state"] for x in r] == [" I save."]),
+            Step("identical chunked rerun sends nothing",
+                 ["classify", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET, "--cache", "cache-k", *stub_args],
+                 '{"id":"k3","state":"The app crashes when I save."}', stub=[ok()],
+                 stdout=lambda o: lines_json(o)[0]["id"] == "k3" and lines_json(o)[0]["chunking"]["count"] == 2,
+                 requests=lambda r: r == []),
+            Step("transient chunk failure is retried, only that chunk resent",
+                 ["classify", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET, "--retries", "1", *stub_args],
+                 '{"id":"r","state":"The app crashes when I save."}',
+                 stub=[ok(choice_reply(0.5, 0.25, 0.25)), (503, SECRET_BODY, 0), ok(choice_reply(0.0, 0.75, 0.25))],
+                 stdout=lambda o: lines_json(o)[0]["answers"]["topic"]["choice"] == "bug",
+                 requests=lambda r: [x["body"]["state"] for x in r] == ["The app crashes when", " I save.", " I save."]),
+            Step("chunked records under --concurrency keep input order",
+                 ["batch", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET, "--concurrency", "2", *stub_args],
+                 '{"id":"c1","state":"' + "a" * 30 + '"}\n{"id":"c2","state":"' + "b" * 30 + '"}\n', stub=[ok()] * 4,
+                 stdout=lambda o: [x["id"] for x in lines_json(o)] == ["c1", "c2"]
+                 and all(x["chunking"]["count"] == 2 for x in lines_json(o)),
+                 requests=lambda r: sorted(x["body"]["state"] for x in r) == ["a" * 10, "a" * 20, "b" * 10, "b" * 20]),
+            Step("dry run prices every chunk and sends nothing",
+                 ["batch", "--dry-run", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET, *stub_args],
+                 '{"id":"s","state":"short"}\n{"id":"d","state":"' + "x" * 41 + '"}\n', stub=[ok()],
+                 stdout=lambda o: [r.get("chunks") for r in lines_json(o)[0]["records"]] == [None, 3],
+                 requests=lambda r: r == []),
+            Step("offline summarize rejects --chunk-tokens", ["summarize", "--input", "results.jsonl", "--chunk-tokens", "30000"],
+                 code=1, stderr="jev: summarize sends no requests; --chunk-tokens is for classify and batch"),
+            Step("score question rejected before any request",
+                 ["classify", "--questions", "score.json", "--chunk-tokens", "30000", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[ok()], code=1, stderr="only choice questions",
+                 requests=lambda r: r == []),
+            Step("object state rejected, never truncated",
+                 ["classify", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET, *stub_args],
+                 '{"id":1,"state":{"text":"x"}}', stub=[ok()], code=1, stderr="only string state",
+                 requests=lambda r: r == []),
+            Step("budget above 32000 rejected",
+                 ["classify", "--questions", "choice.json", "--chunk-tokens", "32001", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[ok()], code=1, stderr="between 1 and 32000",
+                 requests=lambda r: r == []),
+        ],
         "backend-select": [
             Step("env selects base URL and model", ["classify", "--questions", "noul.json"], '{"id":1,"state":"x"}',
                  env={"JEV_BASE_URL": stub_url + "/env", "JEV_MODEL": "env-model"}, stub=[ok()],
@@ -587,6 +700,12 @@ LIVE = [
          stdout=lambda o: [x["id"] for x in lines_json(o)] == ["verify-live-2", "verify-live-3"]
          and all(probability_map_ok(x["answers"]["topic"], CHOICE["topic"]["criteria"]) for x in lines_json(o)),
          timeout=180),
+    Step("live chunked choice", ["classify", "--questions", "choice.json", "--chunk-tokens", CHUNK_BUDGET],
+         '{"id":"verify-live-4","state":"The app crashes every time I press save on a new doc."}',
+         stdout=lambda o: lines_json(o)[0]["id"] == "verify-live-4"
+         and lines_json(o)[0]["chunking"]["count"] == 3
+         and probability_map_ok(lines_json(o)[0]["answers"]["topic"], CHOICE["topic"]["criteria"]),
+         timeout=270),
 ]
 
 
@@ -612,7 +731,7 @@ def build(run_dir, ref):
 
 def write_fixtures(work):
     work.mkdir(parents=True, exist_ok=True)
-    for name, value in {"noul.json": NOUL, "choice.json": CHOICE, "box.json": BOX, "empty.json": {},
+    for name, value in {"noul.json": NOUL, "choice.json": CHOICE, "box.json": BOX, "score.json": SCORE, "empty.json": {},
                         "weird.json": {"q": {"type": "essay"}}, "results.jsonl": RESULTS,
                         "noul.v1.json": {"schema_version": 1, "questions": NOUL},
                         "choice.v1.json": {"schema_version": 1, "questions": CHOICE},
@@ -776,8 +895,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="build fresh, drive journeys, keep evidence")
-    run.add_argument("journeys", nargs="*", help="cli-surface classify batch summarize cache eval backend-select demo-redaction live-opencode")
-    run.add_argument("--live", action="store_true", help="add live-opencode: 3 tiny synthetic requests to OpenCode")
+    run.add_argument("journeys", nargs="*", help="cli-surface classify batch summarize cache chunk eval backend-select demo-redaction live-opencode")
+    run.add_argument("--live", action="store_true", help="add live-opencode: 4 tiny synthetic records (6 requests) to OpenCode, plus a dry run")
     run.add_argument("--ref", default="worktree", help="worktree (default) or a git ref such as HEAD")
     run.add_argument("--keep-build", action="store_true")
     sub.add_parser("doctor", help="read-only readiness check")
