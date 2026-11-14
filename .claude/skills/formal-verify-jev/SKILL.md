@@ -12,8 +12,8 @@ Tool choice. Python has no practical code-level verifier for this program: Cross
 ## Run
 
 ```sh
-python3 .claude/skills/formal-verify-jev/check.py              # all properties, batch depth 3, ~25s
-python3 .claude/skills/formal-verify-jev/check.py --mutants    # also prove each property can fail, ~4min
+python3 .claude/skills/formal-verify-jev/check.py              # all properties, batch depth 3, ~45s
+python3 .claude/skills/formal-verify-jev/check.py --mutants    # also prove each property can fail, ~6min
 python3 .claude/skills/formal-verify-jev/check.py --only retry  # retry policy alone, <1s
 python3 .claude/skills/formal-verify-jev/check.py --only redaction   # demo redaction only, <1s
 python3 .claude/skills/formal-verify-jev/check.py --only cache # cache properties only, ~12s
