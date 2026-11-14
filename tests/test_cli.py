@@ -250,15 +250,15 @@ class CliTests(unittest.TestCase):
     def summarize(self, lines, *extra, questions=None):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "results.jsonl"
-            raw = "".join(json.dumps(line) + "\n" for line in lines)
-            source.write_text(raw)
+            raw = "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines)
+            source.write_text(raw, encoding="utf-8")
             args = [sys.executable, str(ROOT / "jev.py"), "summarize", "--input", str(source), *extra]
             if questions is not None:
                 (Path(tmp) / "q.json").write_text(json.dumps(questions))
                 args += ["--questions", str(Path(tmp) / "q.json")]
             run = subprocess.run(args, env={"PATH": os.environ["PATH"], "HOME": tmp},
                                  capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
-            self.assertEqual(source.read_text(), raw)
+            self.assertEqual(source.read_text(encoding="utf-8"), raw)
             return run
 
     def test_summarize_counts_examples_and_confidence_bins(self):
@@ -303,6 +303,13 @@ class CliTests(unittest.TestCase):
             self.assertIn("line 1; 'q' is not a Choice answer", run.stderr)
         run = self.summarize([], questions={"q": {"type": "noul"}})
         self.assertIn("Choice questions only", run.stderr)
+
+    def test_summarize_seeds_inferred_question_and_keeps_unicode_separators(self):
+        questions = {**QUESTIONS, "other": {"type": "noul"}}
+        run = self.summarize([{"id": "a\u2028b", "answers": {"route": {"choice": "b"}}}], questions=questions)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        summary = json.loads(run.stdout)
+        self.assertEqual((summary["counts"], summary["examples"]), ({"a": 0, "b": 1}, {"a": [], "b": ["a\u2028b"]}))
 
     def test_summarize_reads_no_credentials_and_sends_nothing(self):
         line = json.dumps({"id": 1, "answers": {"route": {"type": "choice", "choice": "a", "confidence": 0.5}}})

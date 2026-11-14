@@ -347,7 +347,7 @@ def evaluate(name, options, label_lines, prediction_lines):
     }
 
 
-def summarize(lines, question=None, labels=()):
+def summarize(lines, question=None, questions=None):
     records = []
     for number, line in enumerate(lines, 1):
         try:
@@ -362,6 +362,12 @@ def summarize(lines, question=None, labels=()):
         if len(names) != 1:
             raise JevError("select one question with --question; input has " + (", ".join(names) or "no answers"))
         question = names[0]
+    labels = ()
+    if questions and question in questions:
+        spec = questions[question]
+        if not isinstance(spec, dict) or spec.get("type") != "choice" or not isinstance(spec.get("criteria"), dict):
+            raise JevError(f"summarize supports Choice questions only; {question!r} is not one")
+        labels = list(spec["criteria"])
     counts = dict.fromkeys(labels, 0)
     examples = {label: [] for label in labels}
     edges = (0.0, *CALIBRATION_EDGES, 1.0)
@@ -478,20 +484,19 @@ def main(argv=None):
 
 
 def run_summarize(args):
-    question, labels = args.question, ()
+    question, questions = args.question, None
     if args.questions:
         questions = read_json(args.questions.read_text(encoding="utf-8"))
         if not isinstance(questions, dict) or not questions:
             raise JevError("questions must be a nonempty API question mapping")
         if question is None and len(questions) == 1:
             question = next(iter(questions))
-        if question in questions:
-            spec = questions[question]
-            if not isinstance(spec, dict) or spec.get("type") != "choice" or not isinstance(spec.get("criteria"), dict):
-                raise JevError(f"summarize supports Choice questions only; {question!r} is not one")
-            labels = list(spec["criteria"])
-    lines = args.input.read_text(encoding="utf-8").splitlines() if args.input else sys.stdin
-    summary = summarize(lines, question, labels)
+    if args.input:
+        # File iteration splits on newlines only, like stdin; str.splitlines would also split U+2028 inside JSON strings.
+        with args.input.open(encoding="utf-8") as source:
+            summary = summarize(source, question, questions)
+    else:
+        summary = summarize(sys.stdin, question, questions)
     for diagnostic in summary["diagnostics"]:
         print("jev: " + diagnostic, file=sys.stderr)
     print(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False))
