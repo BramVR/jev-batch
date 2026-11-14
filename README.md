@@ -54,10 +54,8 @@ A rerun with the same cache sends no request for records it already answered. Af
 - Format. `DIR/v1/<first two hex>/<sha256>.json` holds `{"version": 1, "key": <sha256>, "response": <full API response>}`. A future format bumps the version directory and ignores old entries.
 - What is stored. Only responses that pass the CLI's response validation. HTTP errors, connection failures, invalid JSON, and invalid response objects never write an entry. A corrupt, truncated, mismatched, or invalid entry counts as a miss and is overwritten after a successful request.
 - Writes. Each entry is written to a temp file in the same directory, fsynced, and renamed into place, so readers never see a partial entry. Concurrent writers for the same key each write a complete valid entry and the last rename wins. Runs do not lock or coordinate, so two concurrent runs can both send the same uncached record. If an entry cannot be written, stderr shows `jev: warning: could not write cache entry` and the result is still printed.
-- Private data. Entries hold full API responses, not states, questions, or credentials, but responses can still reveal private content. Entry files are created mode 0600 and new directories 0700. Keep the cache under an ignored path such as `.private/` and never commit it.
+- Private data. Entries hold full API responses, not states, questions, or credentials, but responses can still reveal private content. Entry files are created owner-only (mode 0600). Keep the cache under an ignored path such as `.private/` and never commit it.
 - Bypass. Omit `--cache` to send every request. Delete `DIR`, or one entry file, to force a refetch. There is no expiry.
-
-`scripts/demo_sessions.py --send` uses `.private/demo/cache`, so rerunning an approved send only bills records that have not succeeded.
 
 ## Question files
 
@@ -70,7 +68,7 @@ A top-level `schema_version` key marks a versioned document, so it cannot name a
 
 Before any HTTP request, the CLI exits 1 on unreadable or invalid JSON, nonfinite numbers, an unknown or non-integer `schema_version`, missing or extra wrapper keys, an empty or non-object mapping, or an unsupported question type. Errors name the rule that failed and never echo file contents.
 
-Only the `questions` mapping is sent. `schema_version` describes the file format. It is never sent and is not part of a question set's identity. Wrapping a legacy file in version 1 changes nothing the API sees, and any change to question content changes every request. jev-cli keeps no response cache. A cache built on its output must key on the unwrapped mapping, model, and record, never on the file path or `schema_version` alone.
+Only the `questions` mapping is sent. `schema_version` describes the file format. It is never sent and is not part of a question set's identity. Wrapping a legacy file in version 1 changes nothing the API sees, and any change to question content changes every request. The `--cache` key uses the unwrapped mapping, never the file path or `schema_version`, so a version-1 file and its legacy equivalent share cache entries.
 
 ## Question contracts
 
