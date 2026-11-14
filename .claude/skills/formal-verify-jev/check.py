@@ -29,7 +29,7 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "654da228ef38acbc73073c997554abd46d4a3066",
+    "jev.py": "f03a020c0c7fb9fa75b0b89ece7fdf3cb5368a41",
     "scripts/demo_sessions.py": "5a45729868d435be631d5df31262a2218e158fb8",
 }
 KEY = "sentinel-key-not-real"
@@ -908,6 +908,8 @@ EVAL_ERRORS = [
     (['{"id":"x","label":"a"}'], [], (), "jev: eval needs --question naming a Choice question"),
     (['{"id":"x","label":"a"}'], [], ("--question", "n"), "jev: eval needs --question naming a Choice question"),
     (['{"id":"x","label":"a"}'], [], ("--question", "zz"), "jev: eval needs --question naming a Choice question"),
+    (['{"id":"x","label":"a"}'], [], ("--question", "r", "--cache", "eval-cache-never-created"),
+     "jev: eval sends no requests; --cache is for classify and batch"),
 ]
 
 
@@ -1026,6 +1028,8 @@ MUTANTS = [
      [('        if args.command == "eval":\n            if not args.labels:',
        '        if args.command == "eval":\n            questions = read_json(args.questions.read_text(encoding="utf-8"))\n'
        '            if not args.labels:')]),
+    ("eval accepts --cache and ignores it", "eval-errors",
+     [('        if args.command == "eval" and args.cache:\n', '        if False:\n')]),
     ("eval writes the labels file", "eval-inputs-unchanged",
      [('            with args.labels.open(encoding="utf-8") as labels:',
        '            args.labels.write_text(args.labels.read_text(encoding="utf-8") + " ", encoding="utf-8")\n'

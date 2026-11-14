@@ -9,7 +9,7 @@
 - `eval-offline` nothing reaches System One even with `JEV_BASE_URL` set and a key in the env.
 - `eval-input-errors` duplicate IDs in either file, a label outside criteria keys, an empty labels file, and malformed lines exit 1 with no stdout and name the file and line.
 - `eval-question-files` `--questions` accepts either question-file form through the same loader as `classify` and `batch`; a version-1 document scores identically and an unknown `schema_version` exits 1 before scoring.
-- `eval-flags` eval requires `--labels`; `--question` must name a Choice question (optional when the mapping has one); `--labels` and `--question` are rejected on `classify` and `batch`.
+- `eval-flags` eval requires `--labels`; `--question` must name a Choice question (optional when the mapping has one); `--labels` and `--question` are rejected on `classify` and `batch`. `--cache` is rejected on eval, which sends nothing to cache.
 
 ## How to get to it (user POV)
 
