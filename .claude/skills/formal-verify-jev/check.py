@@ -359,6 +359,7 @@ def check_numbers(c):
 QUESTION_TYPES = ("choice", "score", "noul", "box")
 PRIVATE = "PRIVATE-question-content"
 GENERIC_ERROR = "jev: could not read input, credentials, or API JSON"
+EVAL_ENV = {"TYPESAFE_API_KEY": KEY, "JEV_BASE_URL": "https://api.typesafe.ai/v1"}
 QNOUL = {"type": "noul", "instructions": PRIVATE}
 MAPPINGS = [
     {"n": QNOUL},
@@ -424,6 +425,28 @@ def check_question_files(c):
             c.fail("questions-reject-message", case, f"stderr {run.stderr!r}")
         if PRIVATE in run.stderr + run.stdout:
             c.fail("questions-reject-no-echo", case, f"stderr {run.stderr[:200]!r}")
+    labels = c.tmp / "eval-labels.jsonl"
+    labels.write_text('{"id":"q","label":"a"}\n', encoding="utf-8")
+    for label, document in question_documents():
+        c.cases += 1
+        case = f"questions eval {label}"
+        run = drive(c.jev, ["eval", "--questions", c.questions_file(document), "--labels", str(labels), "--question", "c"],
+                    '{"id":"q","answers":{"c":{"choice":"a","confidence":1.0}}}\n', EVAL_ENV)
+        if not c.clean_exit("questions-clean-exit", case, run):
+            continue
+        if run.requests or run.key_reads:
+            c.fail("eval-offline", case, f"{len(run.requests)} requests, {run.key_reads} credential reads")
+        mapping = None if isinstance(document, bytes) else expected_questions(document)
+        choice = (mapping or {}).get("c")
+        if choice and choice["type"] == "choice" and isinstance(choice.get("criteria"), dict) and choice["criteria"]:
+            report = json.loads(run.stdout) if run.code == 0 else {}
+            if report.get("labels") != list(choice["criteria"]) or report.get("accuracy") != 1.0:
+                c.fail("questions-eval-same-loader", case, f"exit {run.code} stdout {run.stdout[:120]!r} stderr {run.stderr!r}")
+            continue
+        lines = run.stderr.splitlines()
+        if run.code != 1 or run.stdout or len(lines) != 1 or not lines[0].startswith("jev: ") \
+                or lines[0] == GENERIC_ERROR or PRIVATE in run.stderr:
+            c.fail("questions-eval-same-loader", case, f"exit {run.code} stderr {run.stderr[:200]!r}")
 
 
 # P5. Demo redaction: no planted value survives, structure and IDs stay, a second pass is a no-op,
@@ -793,7 +816,6 @@ ABSENT = object()
 EVAL_CHOICES = ["a", "b", "c", ABSENT]
 EVAL_CONFIDENCES = [ABSENT, 0.0999, 0.1, 0.9, 1.0, 1.5, True, "0.5"]
 EVAL_EDGES = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-EVAL_ENV = {"TYPESAFE_API_KEY": KEY, "JEV_BASE_URL": "https://api.typesafe.ai/v1"}
 
 
 def eval_line(id, choice, confidence):
@@ -1000,6 +1022,10 @@ MUTANTS = [
        '        if False:\n            raise JevError(f"labels line {number}: duplicate id")\n')]),
     ("duplicate prediction ids accepted", "eval-errors",
      [('        if id_key(record["id"]) in predictions:', '        if False:')]),
+    ("eval rereads the raw questions file", "questions-eval-same-loader",
+     [('        if args.command == "eval":\n            if not args.labels:',
+       '        if args.command == "eval":\n            questions = read_json(args.questions.read_text(encoding="utf-8"))\n'
+       '            if not args.labels:')]),
     ("eval writes the labels file", "eval-inputs-unchanged",
      [('            with args.labels.open(encoding="utf-8") as labels:',
        '            args.labels.write_text(args.labels.read_text(encoding="utf-8") + " ", encoding="utf-8")\n'
