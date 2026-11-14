@@ -139,7 +139,7 @@ def main(argv=None):
     if args.send and records:
         with (folder / "results.jsonl").open("w", encoding="utf-8") as output:
             run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "batch", "--questions",
-                                  str(ROOT / "examples/failure-patterns.json")],
+                                  str(ROOT / "examples/failure-patterns.json"), "--cache", str(folder / "cache")],
                                  input="".join(json.dumps(r, ensure_ascii=False) + "\n" for r in outgoing),
                                  stdout=output, stderr=subprocess.PIPE, encoding="utf-8",
                                  env={**os.environ, "PYTHONIOENCODING": "utf-8"})
