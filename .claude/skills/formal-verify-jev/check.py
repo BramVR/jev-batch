@@ -884,6 +884,26 @@ def check_cache(c, depth):
                 if not (len(got) == len(expected_out) and all(map(same, got, expected_out))):
                     c.fail("cache-resume-output", case, f"{attempt}: stdout {run.stdout[:200]!r}")
 
+    for base, model, questions, raw in configs:
+        c.cases += 1
+        case = f"cache --dry-run base={base} model={model} questions={sorted(questions)} record={raw[:40]}"
+        cache = c.tmp / "cache-dry"
+        shutil.rmtree(cache, ignore_errors=True)
+        argv = ["classify", "--questions", c.questions_file(questions), "--base-url", base, "--model", model]
+        cold = drive(c.jev, [*argv, "--dry-run", "--cache", str(cache)], raw, respond=responses)
+        created = cache.exists()
+        drive(c.jev, [*argv, "--cache", str(cache)], raw, respond=responses)
+        before = {p: p.read_bytes() for p in cache_entries(cache)}
+        warm = drive(c.jev, [*argv, "--dry-run", "--cache", str(cache)], raw, respond=responses)
+        plain = drive(c.jev, [*argv, "--dry-run"], raw, respond=responses)
+        if not all(c.clean_exit("dry-run-clean-exit", case, r) for r in (cold, warm, plain)):
+            continue
+        after = {p: p.read_bytes() for p in cache_entries(cache)}
+        if created or after != before or cold.requests or warm.requests \
+                or (cold.code, cold.stdout) != (plain.code, plain.stdout) or (warm.code, warm.stdout) != (plain.code, plain.stdout):
+            c.fail("dry-run-ignores-cache", case, f"cache created={created} changed={after != before}, "
+                   f"stdout cold={cold.stdout[:60]!r} warm={warm.stdout[:60]!r} plain={plain.stdout[:60]!r}")
+
 
 # P7. Eval: offline, exact report against an independent oracle, hard errors for ambiguous input.
 
@@ -1150,6 +1170,10 @@ MUTANTS = [
     ("dry run measures the questions wrapper", "dry-run-questions-like-send",
      [('"question_tokens_estimate": estimate_tokens(questions)',
        '"question_tokens_estimate": estimate_tokens({"schema_version": 1, "questions": questions})')]),
+    ("dry run writes the cache", "dry-run-ignores-cache",
+     [("                return estimate(record, questions, backend)",
+       "                cache and cache.store(cache.path(backend.endpoint, request_body(request_payload(record, questions, backend))), {\"answers\": {}})\n"
+       "                return estimate(record, questions, backend)")]),
     ("dry run total drops a batch row", "dry-run-total-is-sum",
      [('total = sum(row["input_tokens_estimate"] for row in rows)',
        'total = sum(row["input_tokens_estimate"] for row in rows[1:]) or rows[0]["input_tokens_estimate"]')]),

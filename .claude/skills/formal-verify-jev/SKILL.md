@@ -12,8 +12,8 @@ Tool choice. Python has no practical code-level verifier for this program: Cross
 ## Run
 
 ```sh
-python3 .claude/skills/formal-verify-jev/check.py              # all properties, batch depth 3, ~17s
-python3 .claude/skills/formal-verify-jev/check.py --mutants    # also prove each property can fail, ~3min
+python3 .claude/skills/formal-verify-jev/check.py              # all properties, batch depth 3, ~20s
+python3 .claude/skills/formal-verify-jev/check.py --mutants    # also prove each property can fail, ~4.5min
 python3 .claude/skills/formal-verify-jev/check.py --only redaction   # demo redaction only, <1s
 python3 .claude/skills/formal-verify-jev/check.py --only cache # cache properties only, ~12s
 python3 .claude/skills/formal-verify-jev/check.py --only questions   # question-file versioning only, <1s
@@ -76,6 +76,7 @@ Each property is one sentence of promise and one of harm.
 - `dry-run-measures-sent-bytes`. A dry run's `request_bytes` equals the length of the body the real send of the same case POSTed, `assets` included. Otherwise the estimate measures a request that is never sent, as it did for Unicode before the fix.
 - `dry-run-tokens` and `dry-run-total-is-sum`. Each record's estimate is the README rule (`ceil(bytes / 4)` over the ASCII-escaped UTF-8 JSON body without `assets`), and the total is the sum of the rows. Otherwise the estimate drifts from what the README promises.
 - `dry-run-questions-like-send`. For every question document, legacy or version 1, valid or not, `--dry-run` gives the same exit code and stderr as a send, and an accepted file's row reports the sent body's byte length and a question estimate over the unwrapped mapping. Otherwise a wrapped file is priced with its `schema_version` metadata, or a file the send rejects gets a price.
+- `dry-run-ignores-cache`. For every cache config, `--dry-run --cache DIR` creates no directory on a cold cache, leaves a warm cache byte-identical, sends nothing, and prints the same report as a dry run without `--cache`. Otherwise pricing a run writes or trusts cache entries, or the estimate depends on cache state the README says it ignores.
 - `dry-run-cost`. Price, status, and cost match the README table, restated in `DRY_RUN_PRICES`: free OpenCode `jev-1.13-free` costs `"0"`, HTTPS TypeSafe `jev-1.14.0` costs `0.042 × tokens / 1e6` exactly as a `Decimal`, and any other host, model, scheme, or a record with assets gives a `null` cost. Otherwise users see an invented price.
 - `*-clean-exit`. No input in scope escapes `main`, `redact`, or the demo's `main` as an uncaught exception.
 
