@@ -27,6 +27,11 @@ CHOICE = {"topic": {"type": "choice", "instructions": "Pick the topic of the mes
                                  "other": "Anything else."}}}
 BOX = {"logo": {"type": "box", "instructions": "Find the logo."}}
 ASSETS = {"shot": {"type": "image", "format": "png", "data_base64": "iVBORw0KGgo="}}
+EVAL_LABELS = "".join(json.dumps({"id": i, "label": v}) + "\n" for i, v in
+                      (("e1", "billing"), ("e2", "bug"), ("e3", "other"), ("e4", "bug")))
+EVAL_RESULTS = "".join(json.dumps({"id": i, "answers": {"topic": {"type": "choice", "choice": c, **conf}}}) + "\n"
+                       for i, c, conf in (("e1", "billing", {"confidence": 1.0}), ("e2", "billing", {"confidence": 0.5}),
+                                          ("e3", "other", {}), ("e5", "bug", {"confidence": 0.9})))
 STUB_RESPONSE = ('{"model":"stub-model","answers":{"topic":{"type":"choice","choice":"bug",'
                  '"confidence":0.30000000000000004,"probabilities":{"billing":0.1,"bug":0.30000000000000004,'
                  '"other":0.6}}},"usage":{"input_tokens":12,"output_tokens":3},"future_field":[1e-7,-0.0]}')
@@ -149,6 +154,8 @@ def journeys(stub_url):
                  code=1, stderr="jev: timeout must be positive and finite"),
             Step("batch refuses --input", ["batch", "--questions", "noul.json", "--input", "record.json"],
                  code=1, stderr="jev: batch reads JSONL from stdin"),
+            Step("eval refuses --input", ["eval", "--questions", "choice.json", "--labels", "x", "--input", "record.json"],
+                 code=1, stderr="jev: eval reads JSONL from stdin"),
             Step("empty question mapping rejected", ["classify", "--questions", "empty.json"],
                  '{"id":1,"state":"x"}', code=1, stderr="jev: questions must be a nonempty"),
             Step("unknown question type rejected", ["classify", "--questions", "weird.json"],
@@ -259,6 +266,32 @@ def journeys(stub_url):
             Step("refetched entry is reused", ["classify", "--questions", "choice.json", "--cache", "cache-c", *stub_args],
                  '{"id":1,"state":"x"}', stub=[ok()], requests=lambda r: r == []),
         ],
+        "eval": [
+            Step("scores fixture exactly, sends nothing", ["eval", "--questions", "choice.json", "--labels", "labels.jsonl"],
+                 EVAL_RESULTS, env={"JEV_BASE_URL": base, "TYPESAFE_API_KEY": SENTINEL_KEY}, stub=[ok()],
+                 stdout=lambda o: eval_ok(json.loads(o)), requests=lambda r: r == []),
+            Step("version-1 questions document scores identically",
+                 ["eval", "--questions", "choice.v1.json", "--labels", "labels.jsonl"], EVAL_RESULTS,
+                 stdout=lambda o: eval_ok(json.loads(o))),
+            Step("unknown schema_version rejected before scoring", ["eval", "--questions", "v2.json", "--labels",
+                                                                    "labels.jsonl"], EVAL_RESULTS, code=1,
+                 stderr="jev: unsupported questions schema_version", stdout=lambda o: o == ""),
+            Step("duplicate label id rejected", ["eval", "--questions", "choice.json", "--labels", "dup-labels.jsonl"],
+                 EVAL_RESULTS, code=1, stderr="jev: labels line 2: duplicate id", stdout=lambda o: o == ""),
+            Step("label outside criteria rejected", ["eval", "--questions", "choice.json", "--labels", "bad-labels.jsonl"],
+                 "", code=1, stderr="jev: labels line 1: label must be one of the topic options"),
+            Step("duplicate prediction id rejected", ["eval", "--questions", "choice.json", "--labels", "labels.jsonl"],
+                 EVAL_RESULTS + EVAL_RESULTS.splitlines(True)[0], code=1, stderr="jev: predictions line 5: duplicate id"),
+            Step("eval requires --labels", ["eval", "--questions", "choice.json"], code=1, stderr="jev: eval requires --labels"),
+            Step("non-Choice question rejected", ["eval", "--questions", "noul.json", "--labels", "labels.jsonl"],
+                 code=1, stderr="jev: eval needs --question naming a Choice question"),
+            Step("--cache rejected with eval", ["eval", "--questions", "choice.json", "--labels", "labels.jsonl",
+                                                 "--cache", "eval-cache"], EVAL_RESULTS, code=1,
+                 stderr="jev: eval sends no requests; --cache is for classify and batch", stdout=lambda o: o == ""),
+            Step("--labels is eval-only", ["batch", "--questions", "choice.json", "--labels", "labels.jsonl", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[ok()], code=1, stderr="jev: --labels and --question are for eval",
+                 requests=lambda r: r == []),
+        ],
         "backend-select": [
             Step("env selects base URL and model", ["classify", "--questions", "noul.json"], '{"id":1,"state":"x"}',
                  env={"JEV_BASE_URL": stub_url + "/env", "JEV_MODEL": "env-model"}, stub=[ok()],
@@ -317,6 +350,16 @@ def journeys(stub_url):
     }
 
 
+def eval_ok(report):
+    filled = {b["low"]: (b["count"], b["mean_confidence"], b["accuracy"]) for b in report["calibration"] if b["count"]}
+    return (report["counts"] == {"labeled": 4, "scored": 3, "unscored": {"missing_prediction": 1, "unknown_choice": 0},
+                                 "extra_predictions": 1, "calibrated": 2, "missing_confidence": 1}
+            and (report["correct"], report["accuracy"]) == (2, 2 / 3)
+            and report["confusion"]["bug"] == {"billing": 1, "bug": 0, "other": 0}
+            and report["confusion"]["billing"]["billing"] == report["confusion"]["other"]["other"] == 1
+            and len(report["calibration"]) == 10 and filled == {0.5: (1, 0.5, 0.0), 0.9: (1, 1.0, 1.0)})
+
+
 def probability_map_ok(answer, labels):
     probs = answer.get("probabilities", {})
     values = list(probs.values())
@@ -363,6 +406,7 @@ def write_fixtures(work):
     for name, value in {"noul.json": NOUL, "choice.json": CHOICE, "box.json": BOX, "empty.json": {},
                         "weird.json": {"q": {"type": "essay"}},
                         "noul.v1.json": {"schema_version": 1, "questions": NOUL},
+                        "choice.v1.json": {"schema_version": 1, "questions": CHOICE},
                         "v2.json": {"schema_version": 2, "questions": NOUL},
                         "extra.v1.json": {"schema_version": 1, "questions": NOUL, "note": SECRET_BODY},
                         "empty.v1.json": {"schema_version": 1, "questions": {}},
@@ -376,6 +420,9 @@ def write_fixtures(work):
         {"type": "session_meta", "payload": {"id": "synthetic-session", "cwd": "/elsewhere"}},
         {"type": "response_item", "payload": {"type": "message", "role": "user",
                                               "content": [{"type": "input_text", "text": DEMO_TEXT}]}})), encoding="utf-8")
+    (work / "labels.jsonl").write_text(EVAL_LABELS, encoding="utf-8")
+    (work / "dup-labels.jsonl").write_text(EVAL_LABELS.splitlines(True)[0] * 2, encoding="utf-8")
+    (work / "bad-labels.jsonl").write_text('{"id": "e1", "label": "refund"}\n', encoding="utf-8")
 
 
 def execute(step, build_dir, work, stub):
@@ -517,7 +564,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="build fresh, drive journeys, keep evidence")
-    run.add_argument("journeys", nargs="*", help="cli-surface classify batch cache backend-select demo-redaction live-opencode")
+    run.add_argument("journeys", nargs="*", help="cli-surface classify batch cache eval backend-select demo-redaction live-opencode")
     run.add_argument("--live", action="store_true", help="add live-opencode: 3 tiny synthetic requests to OpenCode")
     run.add_argument("--ref", default="worktree", help="worktree (default) or a git ref such as HEAD")
     run.add_argument("--keep-build", action="store_true")

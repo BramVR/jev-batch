@@ -82,6 +82,32 @@ Instructions and descriptions can be strings, objects, or arrays where documente
 
 Contracts checked 2026-11-14 against [models](https://docs.typesafe.ai/models), [System One](https://docs.typesafe.ai/api/system-one), [Choice](https://docs.typesafe.ai/primitives/choice), [Score](https://docs.typesafe.ai/primitives/score), [Noul](https://docs.typesafe.ai/primitives/noul), [Box](https://docs.typesafe.ai/primitives/box), and [OpenAPI](https://api.typesafe.ai/openapi.json). Jev's documented default limits are 64k tokens per request and 32k per question. Keep transcripts bounded.
 
+## Evaluate against hand labels
+
+`eval` scores saved batch results for one Choice question against hand labels. It runs offline: no requests, no credential reads, and its input files are only read.
+
+```sh
+python3 jev.py eval --questions examples/eval/questions.json \
+  --labels examples/eval/labels.jsonl < examples/eval/results.jsonl
+```
+
+`--questions` is the same file used for `batch`, in either [question file](#question-files) form. `--question` names the Choice question and may be omitted when the mapping holds one question. Its `criteria` keys are the label set and fix the order of rows and columns. Predictions on stdin are `batch` output lines. Each needs `id` and an `answers` object; eval reads `answers.<question>.choice` and `confidence`.
+
+The labels file is JSONL with one object per line, `{"id": <same JSON value as the record id>, "label": "<criteria key>"}`. IDs join by exact JSON value, so `1` and `"1"` differ. Labels are human judgments written before looking at predictions. Predicted labels are never ground truth, so do not copy model output into this file.
+
+Output is one JSON object:
+
+- `counts.labeled` is the number of hand labels. `counts.scored` is the accuracy and confusion denominator.
+- `counts.unscored.missing_prediction` counts labeled IDs with no prediction line. `counts.unscored.unknown_choice` counts predictions whose choice is missing, not a string, or not a criteria key.
+- `counts.extra_predictions` counts prediction IDs with no label. They are ignored.
+- `correct` and `accuracy` are over scored rows. `accuracy` is `null` when nothing was scored.
+- `confusion[label][choice]` counts scored rows by hand label, then predicted choice.
+- `calibration` has ten fixed buckets `[0.0, 0.1)` through `[0.9, 1.0]`, each low-inclusive, with `1.0` in the top bucket. Each holds `count`, `mean_confidence`, and empirical `accuracy`, both `null` when empty. Only scored rows with a numeric confidence in `[0, 1]` enter a bucket. `counts.calibrated` and `counts.missing_confidence` split scored rows by that rule.
+
+Read calibration bucket by bucket. When `accuracy` sits near `mean_confidence`, the stated confidence matches observed correctness. Accuracy below mean confidence means overconfidence. Small counts make a bucket noise; compare buckets only with enough labeled examples.
+
+Duplicate IDs in either file, a label outside the criteria keys, an empty labels file, malformed or blank lines, and a missing `--labels` exit 1 with no report. Errors name the file and line. Empty predictions report zero scored rows. Eval sends no requests, so `--cache` is rejected with eval.
+
 ## Run the session demo
 
 Prepare the eight most recently modified local session files with usable messages, excluding this repository's sessions:
@@ -115,7 +141,7 @@ The summary holds only `redaction.policy` and per-rule `redaction.counts`, never
 
 Limitations. This pattern list does not detect every secret. It misses short values, unprefixed tokens, tokens glued to a preceding letter or digit, secrets without a `key=` label, names, phone numbers, addresses, and paths outside home directories. It also hits some harmless text, for example `git@github.com` reads as an email. Review the saved sample before sending, and remove anything sensitive the rules missed. Placeholders can hide the context a classifier needs.
 
-To opt out, pass `--no-redact` to both the prepare and the send run. The sample is then saved and sent as extracted, the summary reports policy `disabled`, and the manual review is the only protection. The four Choice labels are heuristic, mutually exclusive judgments over excerpts; `fine` also includes insufficient evidence. Counts are not an accuracy evaluation or a full-session audit.
+To opt out, pass `--no-redact` to both the prepare and the send run. The sample is then saved and sent as extracted, the summary reports policy `disabled`, and the manual review is the only protection. The four Choice labels are heuristic, mutually exclusive judgments over excerpts; `fine` also includes insufficient evidence. Counts are not an accuracy evaluation or a full-session audit. To measure accuracy, hand-label a subset and run [eval](#evaluate-against-hand-labels).
 
 The agent workflow lives in [SKILL.md](SKILL.md). Local demo status lives in [docs/demo.md](docs/demo.md).
 
@@ -128,7 +154,7 @@ python3 jev.py --help
 git diff --check
 ```
 
-Tests mock HTTP at the CLI boundary, checking request shape/auth, complete responses, failures, partial batch output, and credential selection. No live API credential is required for tests.
+Tests mock HTTP at the CLI boundary, checking request shape/auth, complete responses, failures, partial batch output, and credential selection. Eval tests check the example fixture's exact metrics through a fresh process, edge cases, and that eval sends nothing and reads no credentials. No live API credential is required for tests.
 
 Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI and the session demo against a loopback System One stub, with an opt-in `--live` journey of three synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, batch invariants, question-file versioning, and demo redaction over bounded inputs, and proves each check can fail on a broken `jev.py` or demo script:
 
