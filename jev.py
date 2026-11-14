@@ -290,6 +290,8 @@ def main(argv=None):
             raise JevError(f"{args.command} reads JSONL from stdin; --input is for classify")
         if args.command != "eval" and (args.labels or args.question is not None):
             raise JevError("--labels and --question are for eval")
+        if args.command == "eval" and args.cache:
+            raise JevError("eval sends no requests; --cache is for classify and batch")
         questions = load_questions(args.questions)
         if args.command == "eval":
             if not args.labels:
