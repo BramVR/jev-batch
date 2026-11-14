@@ -9,6 +9,7 @@
 - `summarize-bins` bins `0.0-0.1` through `0.9-1.0` include their lower edge; 0 lands in the first bin and 1 in the last.
 - `summarize-confidence-diagnostics` missing confidence counts as `missing`; non-numbers as `malformed` and values outside [0, 1] as `out_of_range`, each with a `jev: line N: ...` stderr line and exit 0.
 - `summarize-question-files` `--questions` takes a legacy mapping or a version-1 document, loaded and validated as for `classify`; both seed the same labels, and an unsupported `schema_version` exits 1 before any summary.
+- `summarize-flag-errors` `--cache`, `--dry-run`, and `--labels` exit 1 with no output; `--question` is shared with `eval`, and `classify`/`batch` reject it.
 - `summarize-selection` several question names in the input exit 1 unless `--question` picks one.
 - `summarize-empty` empty input with a known question prints `records: 0` and zero bins.
 - `summarize-choice-only` a Score, Noul, or Box answer exits 1 naming the line.
@@ -31,7 +32,7 @@ Preconditions:
 
 ## Gotchas
 
-- `--cache` is a `classify`/`batch` flag. `summarize` ignores it, reading and writing no cache entry; summarize cached results by passing the JSONL that `batch --cache` printed.
+- `--cache` and `--dry-run` are `classify`/`batch` flags. `summarize` rejects them with exit 1, as `eval` does, and creates no cache directory; summarize cached results by passing the JSONL that `batch --cache` printed.
 
 - All lines are parsed before any answer is checked, so an invalid JSON line is reported ahead of an earlier non-Choice answer.
 - The step-level success rule allows stderr only when the step names expected stderr; diagnostics are expected on exit 0 here.

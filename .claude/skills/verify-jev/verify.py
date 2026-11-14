@@ -382,6 +382,13 @@ def journeys(stub_url):
             Step("empty input gives zero summary", ["summarize", "--questions", "choice.json"], "",
                  stdout=lambda o: (lambda s: s["records"] == 0 and s["counts"] == {"billing": 0, "bug": 0, "other": 0}
                                    and not any(s["confidence"]["bins"].values()))(json.loads(o))),
+            Step("--cache rejected, no cache dir", ["summarize", "--input", "results.jsonl", "--cache", "sum-cache"],
+                 code=1, stderr="jev: summarize sends no requests; --cache is for classify and batch",
+                 stdout=lambda o: o == "", files=lambda b: not (b.parent / "work" / "sum-cache").exists()),
+            Step("--dry-run rejected", ["summarize", "--input", "results.jsonl", "--dry-run"], code=1,
+                 stderr="jev: summarize sends no requests; --dry-run is for classify and batch", stdout=lambda o: o == ""),
+            Step("--labels rejected", ["summarize", "--input", "results.jsonl", "--labels", "labels.jsonl"], code=1,
+                 stderr="jev: --labels is for eval; --question is for eval and summarize", stdout=lambda o: o == ""),
             Step("Score answer rejected with line", ["summarize"],
                  '{"id":1,"answers":{"level":{"type":"score","score":2}}}\n', code=1,
                  stderr="jev: summarize stopped at line 1; 'level' is not a Choice answer", stdout=lambda o: o == ""),
