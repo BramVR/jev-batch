@@ -23,7 +23,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[3]
 TARGET = ROOT / "jev.py"
 COVERED = ["jev.py"]
-SYNC_COMMIT = "b267dfb"
+SYNC_COMMIT = "f5e59fc"
 KEY = "sentinel-key-not-real"
 SECRET_BODY = "SECRET-BODY-must-not-leak"
 TYPESAFE_HOST = "api.typesafe.ai"
