@@ -23,7 +23,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[3]
 TARGET = ROOT / "jev.py"
 COVERED = ["jev.py"]
-SYNC_COMMIT = "3de01c2"
+SYNC_COMMIT = "b267dfb"
 KEY = "sentinel-key-not-real"
 SECRET_BODY = "SECRET-BODY-must-not-leak"
 TYPESAFE_HOST = "api.typesafe.ai"
@@ -107,12 +107,12 @@ class Checker:
         self._files = {}
 
     def questions_file(self, questions):
-        text = json.dumps(questions)
-        if text not in self._files:
+        data = questions if isinstance(questions, bytes) else json.dumps(questions).encode()
+        if data not in self._files:
             path = self.tmp / f"q{len(self._files)}.json"
-            path.write_text(text)
-            self._files[text] = str(path)
-        return self._files[text]
+            path.write_bytes(data)
+            self._files[data] = str(path)
+        return self._files[data]
 
     def fail(self, prop, case, detail):
         self.violations.append((prop, case, detail))
@@ -345,6 +345,78 @@ def check_numbers(c):
             c.fail("numbers-passthrough-exact", case, f"exit {run.code} stdout {run.stdout[:200]!r}")
 
 
+# P4. Question files: legacy mappings and version-1 documents send the same unwrapped mapping; bad files never reach HTTP.
+
+QUESTION_TYPES = ("choice", "score", "noul", "box")
+PRIVATE = "PRIVATE-question-content"
+GENERIC_ERROR = "jev: could not read input, credentials, or API JSON"
+QNOUL = {"type": "noul", "instructions": PRIVATE}
+MAPPINGS = [
+    {"n": QNOUL},
+    {"c": {"type": "choice", "criteria": {"a": PRIVATE, "b": "B"}}, "s": {"type": "score", "criteria": ["lo", "hi"]}},
+    {}, [], [QNOUL], "x", None, {"q": "noul"}, {"q": {"type": "essay", "note": PRIVATE}},
+]
+VERSIONS = [1, 2, 0, -1, "1", 1.0, True, None, [1], QNOUL]
+RAW_FILES = [b"", b"{", b"null", b'"s"', b"\xff\xfe", b'{"n":{"type":"noul","x":NaN}}',
+             b'{"n":{"type":"noul","x":1e999}}', b"[" * 100000]
+
+
+def question_documents():
+    for m in MAPPINGS:
+        yield f"legacy {json.dumps(m)[:50]}", m
+        for v in VERSIONS:
+            label = f"v={json.dumps(v)[:20]} m={json.dumps(m)[:50]}"
+            yield "wrapped " + label, {"schema_version": v, "questions": m}
+            yield "reordered " + label, {"questions": m, "schema_version": v}
+            yield "extra-key " + label, {"schema_version": v, "questions": m, PRIVATE: PRIVATE}
+        yield f"no-version {json.dumps(m)[:50]}", {"questions": m}
+    for v in VERSIONS:
+        yield f"no-questions v={json.dumps(v)[:20]}", {"schema_version": v}
+    for raw in RAW_FILES:
+        yield f"raw {raw[:30]!r}", raw
+
+
+def expected_questions(document):
+    """The README contract: the mapping a question file must send, or None if it must be rejected."""
+    if isinstance(document, dict) and "schema_version" in document:
+        version = document["schema_version"]
+        if type(version) is not int or version != 1 or sorted(document) != ["questions", "schema_version"]:
+            return None
+        document = document["questions"]
+    if not isinstance(document, dict) or not document:
+        return None
+    if any(not isinstance(q, dict) or q.get("type") not in QUESTION_TYPES for q in document.values()):
+        return None
+    return document
+
+
+def check_question_files(c):
+    for (label, document), command in itertools.product(question_documents(), ("classify", "batch")):
+        c.cases += 1
+        case = f"questions {command} {label}"
+        run = drive(c.jev, [command, "--questions", c.questions_file(document)], '{"id":"q","state":"x"}\n',
+                    respond=lambda i, r: json.dumps(ok_response(i)).encode())
+        if not c.clean_exit("questions-clean-exit", case, run):
+            continue
+        expected = None if isinstance(document, bytes) else expected_questions(document)
+        if (run.code == 0) != (expected is not None):
+            c.fail("questions-accept-iff-valid", case, f"exit {run.code} stderr {run.stderr[:120]!r}")
+            continue
+        if expected is not None:
+            bodies = [json.loads(r["request"].data) for r in run.requests]
+            if len(bodies) != 1 or list(bodies[0]) != ["model", "state", "questions"] \
+                    or not same(bodies[0]["questions"], expected):
+                c.fail("questions-unwrap-exact", case, f"bodies {bodies!r:.200}")
+            continue
+        if run.code != 1 or run.requests:
+            c.fail("questions-reject-before-network", case, f"exit {run.code}, {len(run.requests)} requests")
+        lines = run.stderr.splitlines()
+        if len(lines) != 1 or not lines[0].startswith("jev: ") or lines[0] == GENERIC_ERROR:
+            c.fail("questions-reject-message", case, f"stderr {run.stderr!r}")
+        if PRIVATE in run.stderr + run.stdout:
+            c.fail("questions-reject-no-echo", case, f"stderr {run.stderr[:200]!r}")
+
+
 # Broken variants of jev.py. Each must make the named property fail, or the check proves nothing.
 
 MUTANTS = [
@@ -368,6 +440,23 @@ MUTANTS = [
     ("free backend accepts Box", "box-rejected-locally-on-free",
      [('        return not (urlsplit(self.base_url).hostname == "opencode.ai"',
        '        return True or not (urlsplit(self.base_url).hostname == "opencode.ai"')]),
+    ("wrapper never unwrapped", "questions-accept-iff-valid",
+     [('        document = document["questions"]\n', "")]),
+    ("schema_version leaked into the request", "questions-unwrap-exact",
+     [('"questions": questions}\n    if "assets" in record:', '"questions": questions, "schema_version": 1}\n    if "assets" in record:')]),
+    ("unknown schema_version accepted", "questions-accept-iff-valid",
+     [("if type(version) is not int or version not in SCHEMA_VERSIONS:", "if type(version) is not int:")]),
+    ("bool schema_version accepted", "questions-accept-iff-valid",
+     [("if type(version) is not int or version not in SCHEMA_VERSIONS:",
+       "if not isinstance(version, int) or version not in SCHEMA_VERSIONS:")]),
+    ("extra wrapper keys allowed", "questions-accept-iff-valid",
+     [('if set(document) != {"schema_version", "questions"}:', 'if "questions" not in document:')]),
+    ("wrapper error echoes keys", "questions-reject-no-echo",
+     [('raise JevError("versioned questions document must contain exactly schema_version and questions")',
+       'raise JevError("versioned questions document has keys: " + ", ".join(document))')]),
+    ("bad questions JSON gets the generic error", "questions-reject-message",
+     [("    except (OSError, ValueError, RecursionError):\n        raise JevError(\"questions file",
+       "    except OSError:\n        raise JevError(\"questions file")]),
 ]
 
 # Violations the current code produces. Each stays listed until the code is fixed; the check fails if one disappears.
@@ -385,7 +474,7 @@ def run_all(jev, depth, only=None):
     with tempfile.TemporaryDirectory() as tmp:
         c = Checker(jev, tmp)
         for name, fn in (("batch", lambda: check_batch(c, depth)), ("requests", lambda: check_requests(c)),
-                         ("numbers", lambda: check_numbers(c))):
+                         ("numbers", lambda: check_numbers(c)), ("questions", lambda: check_question_files(c))):
             if only in (None, name):
                 fn()
         return c
@@ -414,7 +503,7 @@ def stale():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--depth", type=int, default=3, help="max batch length to enumerate (default 3)")
-    parser.add_argument("--only", choices=["batch", "requests", "numbers"])
+    parser.add_argument("--only", choices=["batch", "requests", "numbers", "questions"])
     parser.add_argument("--mutants", action="store_true", help="also prove each property fails on a broken jev.py")
     parser.add_argument("--stale", action="store_true", help="only report covered-file changes since SYNC_COMMIT")
     args = parser.parse_args()
