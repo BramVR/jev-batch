@@ -7,7 +7,7 @@
 - `dry-run-free` the default OpenCode `jev-1.13-free` reports status `free` and `estimated_cost_usd` `"0"`.
 - `dry-run-priced` TypeSafe `--base-url https://api.typesafe.ai/v1 --model jev-1.14.0` reports status `priced`, `0.042` USD per million input tokens, and cost equal to `0.042 × total / 1e6`, with no key in the env.
 - `dry-run-unknown` any other host or model reports status `unknown`, and price and cost are `null`, never a guess.
-- `dry-run-rows` batch rows carry `line` and `id` in input order, and the total equals the sum of the rows. Unicode state counts one token per non-ASCII code point.
+- `dry-run-rows` batch rows carry `line` and `id` in input order, and the total equals the sum of the rows. Each row's `request_bytes` is the exact body a send would POST. Unicode state counts as its ASCII `\uXXXX` escapes.
 - `dry-run-assets` a record with image `assets` is flagged `assets_not_estimated`, and the cost becomes `null`.
 - `dry-run-invalid` the first invalid batch line exits 1 with `batch stopped at line N` and no report.
 - `dry-run-gating` Box on the free model is rejected exactly as a send would be.
@@ -26,6 +26,7 @@ Preconditions:
 - **All steps.** Run `python3 .claude/skills/verify-jev/verify.py run dry-run`. Every step prints `PASS`.
 - **No-send proof.** The stub-backed steps show no `stub saw` block, although the stub had a reply queued.
 - **Estimate proof.** Each report's stdout names `not a tokenizer count` in `token_method`, the pricing `date`, and `currency` `USD`.
+- **Exact-bytes proof.** The two Unicode steps show the dry run's `request_bytes` equal to the `bytes` the stub received for the same record.
 - **Regression proof.** `run --ref 8de76f2 dry-run` fails every step, because that commit predates the flag.
 
 ## Gotchas

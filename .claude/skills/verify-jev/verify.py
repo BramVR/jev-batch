@@ -74,7 +74,7 @@ class Stub:
             def do_POST(self):
                 raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 stub.seen.append({"method": "POST", "path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()},
-                                  "body": json.loads(raw)})
+                                  "body": json.loads(raw), "bytes": len(raw)})
                 status, body, delay = stub.queue.pop(0) if stub.queue else (500, SECRET_BODY, 0)
                 time.sleep(delay)
                 try:
@@ -143,6 +143,10 @@ def no_cache_entries(name):
     return lambda work: not any(p.is_file() for p in (work / name).rglob("*"))
 
 
+UNICODE_RECORD = '{"id":"d-7","state":"日本語🙂 refund ünï"}'
+UNICODE_BYTES = len(json.dumps({"model": "jev-1.13-free", "state": "日本語🙂 refund ünï", "questions": NOUL}).encode())
+
+
 def report(out, status, cost=None, rows=None):
     """One dry-run JSON report: labelled estimate, pricing status, totals equal the rows, cost as stated."""
     lines = out.splitlines()
@@ -157,6 +161,7 @@ def report(out, status, cost=None, rows=None):
     return (r["dry_run"] is True and "not a tokenizer count" in r["token_method"]
             and r["pricing"]["date"] and r["pricing"]["currency"] == "USD" and r["pricing"]["status"] == status
             and total == sum(x["input_tokens_estimate"] for x in records)
+            and all(x["request_bytes"] >= 4 * x["input_tokens_estimate"] - 3 for x in records)
             and (rows is None or [(x.get("line"), x["id"]) for x in records] == rows) and cost_ok)
 
 
@@ -385,6 +390,11 @@ def journeys(stub_url):
                  json.dumps({"id": "d-6", "state": "x", "assets": ASSETS}), stub=[ok()],
                  stdout=lambda o: report(o, "unknown", None) and json.loads(o)["records"][0]["assets_not_estimated"],
                  requests=lambda r: r == []),
+            Step("Unicode dry run measures the exact bytes the send then posts (dry step)",
+                 ["classify", "--dry-run", "--questions", "noul.json", *stub_args], UNICODE_RECORD,
+                 stdout=lambda o: report(o, "unknown", None) and json.loads(o)["records"][0]["request_bytes"] == UNICODE_BYTES),
+            Step("Unicode send posts that many bytes (send step)", ["classify", "--questions", "noul.json", *stub_args],
+                 UNICODE_RECORD, stub=[ok()], requests=lambda r: r[0]["bytes"] == UNICODE_BYTES),
             Step("invalid line 2 stops with no report", ["batch", "--dry-run", "--questions", "noul.json"],
                  '{"id":1,"state":"a"}\n{not json\n', code=1,
                  stderr="jev: batch stopped at line 2; invalid JSON record", stdout=lambda o: o == ""),
@@ -506,7 +516,7 @@ def execute(step, build_dir, work, stub):
     shown = " ".join(["python3", step.script, *step.argv])
     return {"step": step.name, "command": shown, "stdin": step.stdin, "env": sorted(step.env),
             "exit": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr, "seconds": round(elapsed, 2),
-            "stub_requests": [{k: r[k] for k in ("path", "body")} | {"headers": {
+            "stub_requests": [{k: r[k] for k in ("path", "bytes", "body")} | {"headers": {
                 h: v for h, v in r["headers"].items() if h in ("user-agent", "authorization", "content-type",
                                                                "typesafe-danger-zone-images")}} for r in seen],
             "problems": problems}
