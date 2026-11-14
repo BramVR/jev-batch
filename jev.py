@@ -486,9 +486,7 @@ def main(argv=None):
 def run_summarize(args):
     question, questions = args.question, None
     if args.questions:
-        questions = read_json(args.questions.read_text(encoding="utf-8"))
-        if not isinstance(questions, dict) or not questions:
-            raise JevError("questions must be a nonempty API question mapping")
+        questions = load_questions(args.questions)
         if question is None and len(questions) == 1:
             question = next(iter(questions))
     if args.input:

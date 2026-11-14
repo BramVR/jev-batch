@@ -98,7 +98,7 @@ Summarize saved batch output offline. It reads no credentials and makes no netwo
 python3 jev.py summarize --question failure_pattern --questions examples/failure-patterns.json < results.jsonl
 ```
 
-Input is the JSONL that `classify` or `batch` wrote, from stdin or `--input results.jsonl`. The source file is only read. `--question` names the Choice answer to count. It is optional only when the input holds exactly one question name, or when `--questions` holds exactly one question. Results with several question names need one summary per name. `--questions` is optional here. When given, its `criteria` order seeds every label with a zero count. Labels not in the criteria follow in first-seen order.
+Input is the JSONL that `classify` or `batch` wrote, from stdin or `--input results.jsonl`. The source file is only read. `--question` names the Choice answer to count. It is optional only when the input holds exactly one question name, or when `--questions` holds exactly one question. Results with several question names need one summary per name. `--questions` is optional here. When given, it accepts either question-file form and is validated as for `classify`, and its `criteria` order seeds every label with a zero count. Labels not in the criteria follow in first-seen order.
 
 The output is one JSON object:
 

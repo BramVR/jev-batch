@@ -311,6 +311,20 @@ class CliTests(unittest.TestCase):
         summary = json.loads(run.stdout)
         self.assertEqual((summary["counts"], summary["examples"]), ({"a": 0, "b": 1}, {"a": [], "b": ["a\u2028b"]}))
 
+    def test_summarize_seeds_labels_from_legacy_and_versioned_question_files(self):
+        line = {"id": 1, "answers": {"failure_pattern": {"type": "choice", "choice": "fine", "confidence": 0.5}}}
+        legacy = json.loads((ROOT / "examples/failure-patterns.json").read_text())
+        counts = []
+        for name in ("failure-patterns.json", "failure-patterns.v1.json"):
+            run = self.summarize([line], "--questions", str(ROOT / "examples" / name))
+            self.assertEqual(run.returncode, 0, run.stderr)
+            counts.append(json.loads(run.stdout)["counts"])
+        self.assertEqual(counts[0], counts[1])
+        self.assertEqual(list(counts[1]), list(legacy["failure_pattern"]["criteria"]))
+        run = self.summarize([line], questions={"schema_version": 2, "questions": legacy})
+        self.assertEqual((run.returncode, run.stdout), (1, ""))
+        self.assertIn("unsupported questions schema_version", run.stderr)
+
     def test_summarize_reads_no_credentials_and_sends_nothing(self):
         line = json.dumps({"id": 1, "answers": {"route": {"type": "choice", "choice": "a", "confidence": 0.5}}})
         out = io.StringIO()
