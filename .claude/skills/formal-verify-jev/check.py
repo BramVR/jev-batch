@@ -685,6 +685,22 @@ def check_cache(c, depth):
         if (runs[1].code, runs[1].stderr) != (0, "") or not same(json.loads(runs[1].stdout or "null"), expected):
             c.fail("cache-output-current-id", case, f"exit {runs[1].code} stdout {runs[1].stdout[:160]!r}")
 
+    for mapping in CACHE_QUESTIONS:
+        wrapped = {"schema_version": 1, "questions": mapping}
+        for first, second in ((mapping, wrapped), (wrapped, mapping)):
+            c.cases += 1
+            cache = c.tmp / "cache-forms"
+            shutil.rmtree(cache, ignore_errors=True)
+            runs = [drive(c.jev, ["classify", "--questions", c.questions_file(doc), "--cache", str(cache)],
+                          f'{{"id":{i},"state":"s"}}', respond=lambda r_i, r, i=i: json.dumps(ok_response(i)).encode())
+                    for i, doc in enumerate((first, second))]
+            case = f"cache forms first={json.dumps(first)[:60]} second={json.dumps(second)[:60]}"
+            if not all(c.clean_exit("cache-clean-exit", case, r) for r in runs):
+                continue
+            if len(runs[1].requests) != 0 or not same(json.loads(runs[1].stdout or "null"), {"id": 1, **ok_response(0)}):
+                c.fail("cache-hit-across-question-file-forms", case,
+                       f"second run sent {len(runs[1].requests)}, stdout {runs[1].stdout[:120]!r}")
+
     questions = c.questions_file({"q": NOUL})
     for kind, (stage, line, responder) in LINE_KINDS.items():
         if stage != "net":
@@ -819,6 +835,8 @@ MUTANTS = [
        "        except FileNotFoundError:\n            return None")]),
     ("entry fields not validated", "cache-corrupt-refetch",
      [('entry.get("version") != CACHE_VERSION or entry.get("key") != path.stem', "False")]),
+    ("cache keyed per questions file", "cache-hit-across-question-file-forms",
+     [("cache = Cache(args.cache) if args.cache else None", "cache = Cache(args.cache / args.questions.name) if args.cache else None")]),
     ("cache never read", "cache-resume-sends-only-missing",
      [("cached = cache.load(entry) if entry else None", "cached = None")]),
 ]
