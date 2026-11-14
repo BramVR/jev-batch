@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add offline `eval` that scores saved batch results for one Choice question against hand-labeled JSONL, reporting accuracy, a labeled confusion matrix, and ten fixed calibration buckets with scored and unscored denominators.
+
 - Add opt-in `--cache DIR` that stores validated responses keyed by endpoint and exact request body, so reruns and resumed batches send only missing records; the session demo caches under `.private/demo/cache`.
 - Redact secrets, bearer and API tokens, emails, and Unix/Windows home paths from demo samples before caching and again before sending, on by default with `--no-redact` to opt out; summaries report only policy and counts.
 
