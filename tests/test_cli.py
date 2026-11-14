@@ -368,12 +368,16 @@ class CliTests(unittest.TestCase):
                               report["pricing"]["source"], report["estimated_cost_usd"]), ("unknown", None, None, None))
             self.assertEqual(report["total_input_tokens_estimate"], report["records"][0]["input_tokens_estimate"])
 
-    def test_dry_run_counts_unicode_per_code_point(self):
-        code, out, _ = self.dry_run('{"id":1,"state":""}\n{"id":2,"state":"日本語🙂"}\n')
+    def test_dry_run_measures_the_exact_unicode_bytes_sent(self):
+        record = '{"id":"u","state":"日本語🙂 refund ünï"}'
+        _, _, _, sent = self.run_cli(record, "classify")
+        body = sent[0][0].data
+        code, out, _ = self.dry_run(record, command="classify")
         self.assertEqual(code, 0)
-        empty, unicode = json.loads(out)["records"]
-        self.assertEqual(unicode["state_tokens_estimate"] - empty["state_tokens_estimate"], 4)
-        self.assertEqual(unicode["input_tokens_estimate"] - empty["input_tokens_estimate"], 4)
+        row = json.loads(out)["records"][0]
+        self.assertEqual(row["request_bytes"], len(body))
+        self.assertEqual(row["input_tokens_estimate"], -(-len(body) // 4))
+        self.assertIn(b"\\u65e5", body)
 
     def test_dry_run_more_questions_raise_overhead(self):
         one = json.loads(self.dry_run('{"id":1,"state":"ok"}')[1])["records"][0]
@@ -392,6 +396,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual((code, report["estimated_cost_usd"]), (0, None))
         self.assertIs(report["records"][0]["assets_not_estimated"], True)
         self.assertEqual(report["total_input_tokens_estimate"], plain["total_input_tokens_estimate"])
+        self.assertEqual(report["records"][0]["request_bytes"] - plain["records"][0]["request_bytes"],
+                         len(', "assets": {"img": {"data_base64": "AAAA"}}'))
         self.assertEqual(self.dry_run('{"id":1,"state":"ok","assets":{}}')[0], 1)
 
     def test_dry_run_invalid_line_prints_no_report(self):

@@ -32,8 +32,8 @@ PRICES = {
     **{("api.typesafe.ai", model): ("0.042", TYPESAFE_PRICES)
        for model in ("jev-1.14.0", "jev-1.13.0", "jev-latest", "jev-preview")},
 }
-TOKEN_METHOD = ("heuristic: ceil(ASCII chars / 4) + 1 per non-ASCII code point over the JSON request body "
-                "without assets; not a tokenizer count")
+TOKEN_METHOD = ("heuristic: ceil(bytes / 4) over the exact UTF-8 request body classify sends "
+                "(ASCII-escaped JSON), without assets; not a tokenizer count")
 
 
 @dataclass(frozen=True)
@@ -181,16 +181,19 @@ def request_payload(record, questions, backend):
     return payload
 
 
+def request_body(value):
+    return json.dumps(value, allow_nan=False).encode("utf-8")
+
+
 def estimate_tokens(value):
-    text = json.dumps(value, ensure_ascii=False, allow_nan=False)
-    ascii_chars = sum(char < "\x80" for char in text)
-    return (ascii_chars + 3) // 4 + len(text) - ascii_chars
+    return (len(request_body(value)) + 3) // 4
 
 
 def estimate(record, questions, backend):
     payload = request_payload(record, questions, backend)
     text = {key: value for key, value in payload.items() if key != "assets"}
-    row = {"id": record["id"], "input_tokens_estimate": estimate_tokens(text),
+    row = {"id": record["id"], "request_bytes": len(request_body(payload)),
+           "input_tokens_estimate": estimate_tokens(text),
            "question_tokens_estimate": estimate_tokens(questions),
            "state_tokens_estimate": estimate_tokens(record["state"])}
     if "assets" in payload:
@@ -235,10 +238,7 @@ def classify(record, questions, key, backend, timeout, cache=None):
         headers["Authorization"] = "Bearer " + key
     if uses_images(payload):
         headers["TypeSafe-Danger-Zone-Images"] = "true"
-    body = json.dumps(
-        payload,
-        allow_nan=False,
-    ).encode("utf-8")
+    body = request_body(payload)
     entry = cache.path(backend.endpoint, body) if cache else None
     cached = cache.load(entry) if entry else None
     if cached is not None:

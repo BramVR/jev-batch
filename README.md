@@ -66,16 +66,16 @@ python3 jev.py batch --dry-run --questions questions.json \
   --base-url https://api.typesafe.ai/v1 --model jev-1.14.0 < records.jsonl
 ```
 
-The report names the backend endpoint and model and lists each record's `id` with estimated input, question, and state tokens. Batch rows also carry the input `line`. It totals the input estimates and gives `estimated_cost_usd` as a decimal string. A batch with an invalid line exits 1 with the usual `batch stopped at line N` error and prints no report.
+The report names the backend endpoint and model and lists each record's `id`, its exact `request_bytes`, and estimated input, question, and state tokens. Batch rows also carry the input `line`. It totals the input estimates and gives `estimated_cost_usd` as a decimal string. A batch with an invalid line exits 1 with the usual `batch stopped at line N` error and prints no report.
 
-Token counts are estimates, not tokenizer counts. The rule is `ceil(ASCII chars / 4) + 1 per non-ASCII code point` over the JSON request body the CLI would send, with non-ASCII characters left unescaped. The body includes the model, state, questions, and JSON syntax. The rule is deterministic and conservative for CJK and emoji. Real tokenizers can count differently.
+Token counts are estimates, not tokenizer counts. The rule is `ceil(bytes / 4)` over the exact UTF-8 request body a send would POST, built by the same serializer. That body is ASCII-escaped JSON, so each non-ASCII character counts as its `\uXXXX` escape (6 bytes, 12 for emoji). It includes the model, state, questions, and JSON syntax. The rule is deterministic. Real tokenizers can count differently.
 
 Prices were read 2026-11-14 as input USD per million tokens. The source pages show `$` without a currency code, so USD is assumed:
 
 - OpenCode Zen ([docs](https://opencode.ai/docs/zen)) lists `jev-1.13-free` at 0 and `jev-1.13` at 0.042.
 - TypeSafe ([models](https://docs.typesafe.ai/models)) lists `jev-1.14.0`, `jev-1.13.0`, `jev-latest`, and `jev-preview` at 0.042, for the HTTPS origin only.
 
-Output tokens are not estimated. Both sources list them as free. Any other host or model reports price status `unknown` and a `null` price and cost, never a guess. Image `assets` are excluded from token estimates. Such records are flagged `assets_not_estimated`, and the run's cost is `null`.
+Output tokens are not estimated. Both sources list them as free. Any other host or model reports price status `unknown` and a `null` price and cost, never a guess. Image `assets` count toward `request_bytes` but are excluded from token estimates. Such records are flagged `assets_not_estimated`, and the run's cost is `null`.
 
 ## Question files
 
