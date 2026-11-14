@@ -2,13 +2,16 @@
 """Small stdlib client for Jev System One."""
 
 import argparse
+import contextlib
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
@@ -46,6 +49,49 @@ class Backend:
 
 class JevError(Exception):
     pass
+
+
+CACHE_VERSION = 1
+
+
+@dataclass(frozen=True)
+class Cache:
+    """Validated System One responses keyed by endpoint and exact request body."""
+
+    root: Path
+
+    def path(self, endpoint, body):
+        digest = hashlib.sha256(f"jev-cache-v{CACHE_VERSION}\n{endpoint}\n".encode("utf-8") + body).hexdigest()
+        return self.root / f"v{CACHE_VERSION}" / digest[:2] / (digest + ".json")
+
+    def load(self, path):
+        try:
+            entry = read_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError, RecursionError):
+            return None
+        if not isinstance(entry, dict) or entry.get("version") != CACHE_VERSION or entry.get("key") != path.stem:
+            return None
+        return entry["response"] if valid_response(entry.get("response")) else None
+
+    def store(self, path, response):
+        entry = json.dumps({"version": CACHE_VERSION, "key": path.stem, "response": response},
+                           ensure_ascii=False, allow_nan=False)
+        try:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd, temp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=".json")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(entry)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp, path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(temp)
+                raise
+        except OSError:
+            # The request already succeeded and may be billed; keep its result.
+            print("jev: warning: could not write cache entry", file=sys.stderr)
 
 
 def api_key():
@@ -90,7 +136,11 @@ def load_questions(path):
     return document
 
 
-def classify(record, questions, key, backend, timeout):
+def valid_response(result):
+    return isinstance(result, dict) and isinstance(result.get("answers"), dict) and "id" not in result
+
+
+def classify(record, questions, key, backend, timeout, cache=None):
     if not isinstance(record, dict) or "id" not in record or "state" not in record:
         raise JevError("record must be an object with id and state")
     if not isinstance(record["state"], (str, dict, list)):
@@ -111,6 +161,10 @@ def classify(record, questions, key, backend, timeout):
         payload,
         allow_nan=False,
     ).encode("utf-8")
+    entry = cache.path(backend.endpoint, body) if cache else None
+    cached = cache.load(entry) if entry else None
+    if cached is not None:
+        return {"id": record["id"], **cached}
     request = urllib.request.Request(
         backend.endpoint, data=body,
         headers=headers,
@@ -128,6 +182,8 @@ def classify(record, questions, key, backend, timeout):
         raise JevError("System One returned an invalid response object")
     if "id" in result:
         raise JevError("System One response id collides with record id")
+    if cache:
+        cache.store(entry, result)
     return {"id": record["id"], **result}
 
 
@@ -139,6 +195,7 @@ def main(argv=None):
     parser.add_argument("--model", default=os.environ.get("JEV_MODEL", DEFAULT_MODEL))
     parser.add_argument("--timeout", type=float, default=60, help="per-request seconds (default 60)")
     parser.add_argument("--input", type=Path, help="one {id,state} JSON record; default stdin")
+    parser.add_argument("--cache", type=Path, metavar="DIR", help="reuse and store successful responses in DIR; off by default")
     args = parser.parse_args(argv)
     try:
         if not math.isfinite(args.timeout) or args.timeout <= 0:
@@ -150,14 +207,15 @@ def main(argv=None):
         if any(q["type"] == "box" for q in questions.values()) and not backend.supports_box:
             raise JevError("Box and assets require a backend and model with image support; free Jev 1.13 is unsupported")
         key = api_key() if backend.typesafe else None
+        cache = Cache(args.cache) if args.cache else None
         if args.command == "classify":
             raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
-            result = classify(read_json(raw), questions, key, backend, args.timeout)
+            result = classify(read_json(raw), questions, key, backend, args.timeout, cache)
             print(json.dumps(result, ensure_ascii=False, allow_nan=False))
         else:
             for number, line in enumerate(sys.stdin, 1):
                 try:
-                    result = classify(read_json(line), questions, key, backend, args.timeout)
+                    result = classify(read_json(line), questions, key, backend, args.timeout, cache)
                 except (JevError, ValueError, UnicodeError, RecursionError) as exc:
                     detail = str(exc) if isinstance(exc, JevError) else "invalid JSON record"
                     print(f"jev: batch stopped at line {number}; {detail}", file=sys.stderr)

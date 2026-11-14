@@ -31,9 +31,10 @@ class CliTests(unittest.TestCase):
 
         def http(request, timeout):
             sent.append((request, timeout))
-            if isinstance(response, Exception):
-                raise response
-            return contextlib.closing(io.BytesIO(json.dumps(response).encode()))
+            body = response(request) if callable(response) else response
+            if isinstance(body, Exception):
+                raise body
+            return contextlib.closing(io.BytesIO(json.dumps(body).encode()))
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "q.json"
@@ -245,6 +246,81 @@ class CliTests(unittest.TestCase):
             code, _, err, sent = self.run_cli('{"id":1,"state":"ok"}', questions=text)
         self.assertEqual((code, sent), (1, []))
         self.assertIn("supported: 1, 2,", err)
+
+    def test_cache_second_run_sends_nothing_and_reattaches_current_ids(self):
+        with tempfile.TemporaryDirectory() as cache:
+            records = [{"id": "a", "state": "one"}, {"id": "b", "state": ["two"]}]
+            code, first, err, sent = self.run_cli("\n".join(map(json.dumps, records)), extra=["--cache", cache])
+            self.assertEqual((code, err, len(sent)), (0, "", 2))
+            renamed = [{**r, "id": f"new-{r['id']}"} for r in records]
+            code, second, err, sent = self.run_cli("\n".join(map(json.dumps, renamed)), extra=["--cache", cache])
+            self.assertEqual((code, err, sent), (0, "", []))
+            self.assertEqual([json.loads(x) for x in second.splitlines()],
+                             [{"id": r["id"], **RESPONSE} for r in renamed])
+            self.assertEqual([{**json.loads(x), "id": None} for x in first.splitlines()],
+                             [{**json.loads(x), "id": None} for x in second.splitlines()])
+            code, out, err, sent = self.run_cli(json.dumps(records[0]), "classify", extra=["--cache", cache])
+            self.assertEqual((code, err, sent, json.loads(out)), (0, "", [], {"id": "a", **RESPONSE}))
+
+    def test_cache_resume_sends_only_missing_records(self):
+        records = [{"id": i, "state": f"s{i}"} for i in range(4)]
+        data = "\n".join(map(json.dumps, records))
+
+        def fail_third(request):
+            return urllib.error.HTTPError("x", 503, "busy", {}, io.BytesIO(b"")) if json.loads(request.data)["state"] == "s2" else RESPONSE
+
+        with tempfile.TemporaryDirectory() as cache:
+            code, out, err, sent = self.run_cli(data, response=fail_third, extra=["--cache", cache])
+            self.assertEqual((code, len(out.splitlines()), len(sent)), (1, 2, 3))
+            self.assertIn("line 3", err)
+            code, out, err, sent = self.run_cli(data, extra=["--cache", cache])
+            self.assertEqual((code, err), (0, ""))
+            self.assertEqual([json.loads(r.data)["state"] for r, _ in sent], ["s2", "s3"])
+            self.assertEqual([json.loads(x)["id"] for x in out.splitlines()], [0, 1, 2, 3])
+
+    def test_cache_misses_on_any_semantic_change(self):
+        typesafe = ["--base-url", "https://api.typesafe.ai/v1", "--model", "jev-1.14.0"]
+        base = '{"id":1,"state":"ok"}'
+        with tempfile.TemporaryDirectory() as cache:
+            for record, extra in ((base, []), (base, typesafe), ('{"id":1,"state":"ok","assets":{}}', typesafe)):
+                self.assertEqual(len(self.run_cli(record, extra=["--cache", cache, *extra])[3]), 1)
+            for record, extra in (
+                (base, ["--base-url", "http://localhost:9/v1"]),
+                (base, ["--model", "other-model"]),
+                ('{"id":1,"state":"changed"}', []),
+                ('{"id":1,"state":"ok","assets":{"img":{"type":"image"}}}', typesafe),
+            ):
+                self.assertEqual(len(self.run_cli(record, extra=["--cache", cache, *extra])[3]), 1, (record, extra))
+            with patch.dict(QUESTIONS["route"], {"instructions": "changed"}):
+                self.assertEqual(len(self.run_cli(base, extra=["--cache", cache])[3]), 1)
+            self.assertEqual(self.run_cli(base, extra=["--cache", cache])[3], [])
+
+    def test_cache_failures_never_hit_and_corrupt_entries_refetch(self):
+        record = '{"id":1,"state":"ok"}'
+        failures = (urllib.error.HTTPError("x", 500, "err", {}, io.BytesIO(b"")), [], {"answers": []},
+                    {"answers": {}, "id": "collision"})
+        with tempfile.TemporaryDirectory() as cache:
+            for response in failures:
+                self.assertEqual(self.run_cli(record, response=response, extra=["--cache", cache])[0], 1)
+            self.assertEqual([p for p in Path(cache).rglob("*") if p.is_file()], [])
+            self.assertEqual(len(self.run_cli(record, extra=["--cache", cache])[3]), 1)
+            [entry] = Path(cache).rglob("*.json")
+            self.assertEqual(entry.stat().st_mode & 0o777, 0o600)
+            stored = json.loads(entry.read_text())
+            for corrupt in ("{trunc", "[]", json.dumps({**stored, "version": 2}), json.dumps({**stored, "key": "x"}),
+                            json.dumps({**stored, "response": {"answers": {}, "id": 1}}), "\udcff"):
+                entry.write_text(corrupt, errors="surrogateescape")
+                code, out, err, sent = self.run_cli(record, extra=["--cache", cache])
+                self.assertEqual((code, err, len(sent), json.loads(out)), (0, "", 1, {"id": 1, **RESPONSE}))
+                self.assertEqual(json.loads(entry.read_text()), stored)
+
+    def test_unwritable_cache_warns_and_keeps_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = Path(tmp) / "file"
+            blocker.write_text("")
+            code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}', extra=["--cache", str(blocker)])
+        self.assertEqual((code, len(sent), json.loads(out)), (0, 1, {"id": 1, **RESPONSE}))
+        self.assertIn("could not write cache entry", err)
 
     def test_help_as_process(self):
         result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "--help"], capture_output=True, text=True)
