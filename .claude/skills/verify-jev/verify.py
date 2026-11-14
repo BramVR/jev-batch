@@ -54,6 +54,7 @@ class Step:
     script: str = "jev.py"
     setup: object = None
     files: object = None
+    before: object = None
 
 
 # Stub System One: a real HTTP server on 127.0.0.1 reached through the user-facing --base-url.
@@ -116,10 +117,24 @@ def write_unicode_sample(build_dir):
     path.write_text(json.dumps({"id": "é-1", "state": "naïve café ✓"}, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def demo_cache_clean(build_dir):
+    entries = [p.read_text(encoding="utf-8") for p in (build_dir / ".private/demo/cache").rglob("*.json")]
+    return bool(entries) and all(clean(e) for e in entries)
+
+
 def write_old_sample(build_dir):
     path = build_dir / ".private/demo/sample.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"id": "old-1", "state": {"messages": [{"role": "user", "text": DEMO_TEXT}]}}) + "\n")
+
+
+def corrupt_cache(work):
+    for entry in (work / "cache-c").rglob("*.json"):
+        entry.write_text('{"version": 1, "key": "trunc')
+
+
+def no_cache_entries(name):
+    return lambda work: not any(p.is_file() for p in (work / name).rglob("*"))
 
 
 def journeys(stub_url):
@@ -199,6 +214,51 @@ def journeys(stub_url):
                  '{"id":1,"state":"a"}\n\n', stub=[ok()], code=1, stderr="jev: batch stopped at line 2",
                  requests=lambda r: len(r) == 1),
         ],
+        "cache": [
+            Step("first run with --cache sends every record", ["batch", "--questions", "choice.json", "--cache", "cache-a", *stub_args],
+                 '{"id":"a","state":"one"}\n{"id":"b","state":["two"]}\n', stub=[ok(), ok()],
+                 stdout=lambda o: [x["id"] for x in lines_json(o)] == ["a", "b"], requests=lambda r: len(r) == 2),
+            Step("rerun with new ids sends zero requests, full answers, current ids",
+                 ["batch", "--questions", "choice.json", "--cache", "cache-a", *stub_args],
+                 '{"id":"a2","state":"one"}\n{"id":{"n":2},"state":["two"]}\n', stub=[ok(), ok()],
+                 stdout=lambda o: lines_json(o) == [{"id": "a2", **response}, {"id": {"n": 2}, **response}],
+                 requests=lambda r: r == []),
+            Step("model change misses", ["classify", "--questions", "choice.json", "--cache", "cache-a",
+                                         "--model", "other-model", *stub_args],
+                 '{"id":"a","state":"one"}', stub=[ok()], requests=lambda r: len(r) == 1),
+            Step("backend change misses", ["classify", "--questions", "choice.json", "--cache", "cache-a",
+                                           "--base-url", stub_url + "/other/"],
+                 '{"id":"a","state":"one"}', stub=[ok()], requests=lambda r: paths(r) == ["/other/systemone"]),
+            Step("question change misses", ["classify", "--questions", "noul.json", "--cache", "cache-a", *stub_args],
+                 '{"id":"a","state":"one"}', stub=[ok()], requests=lambda r: len(r) == 1),
+            Step("version-1 file hits the legacy file's entry",
+                 ["classify", "--questions", "noul.v1.json", "--cache", "cache-a", *stub_args],
+                 '{"id":"v1","state":"one"}', stub=[ok()],
+                 stdout=lambda o: lines_json(o) == [{"id": "v1", **response}], requests=lambda r: r == []),
+            Step("assets change misses", ["classify", "--questions", "choice.json", "--cache", "cache-a",
+                                          "--model", "jev-1.14.0", *stub_args],
+                 json.dumps({"id": "a", "state": "one", "assets": ASSETS}), stub=[ok()], requests=lambda r: len(r) == 1),
+            Step("interrupted batch keeps the prefix", ["batch", "--questions", "choice.json", "--cache", "cache-b", *stub_args],
+                 '{"id":1,"state":"r1"}\n{"id":2,"state":"r2"}\n{"id":3,"state":"r3"}\n{"id":4,"state":"r4"}\n',
+                 stub=[ok(), ok(), (503, SECRET_BODY, 0)], code=1, stderr="jev: batch stopped at line 3",
+                 stdout=lambda o: [x["id"] for x in lines_json(o)] == [1, 2], requests=lambda r: len(r) == 3),
+            Step("rerun after interrupt sends only missing records",
+                 ["batch", "--questions", "choice.json", "--cache", "cache-b", *stub_args],
+                 '{"id":1,"state":"r1"}\n{"id":2,"state":"r2"}\n{"id":3,"state":"r3"}\n{"id":4,"state":"r4"}\n',
+                 stub=[ok(), ok()], stdout=lambda o: [x["id"] for x in lines_json(o)] == [1, 2, 3, 4],
+                 requests=lambda r: [x["body"]["state"] for x in r] == ["r3", "r4"]),
+            Step("failed response is not cached", ["classify", "--questions", "choice.json", "--cache", "cache-c", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[(200, '{"model":"m"}', 0)], code=1,
+                 stderr="jev: System One returned an invalid response object", requests=lambda r: len(r) == 1),
+            Step("retry after failure sends again", ["classify", "--questions", "choice.json", "--cache", "cache-c", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[ok()], before=no_cache_entries("cache-c"),
+                 stdout=lambda o: lines_json(o) == [{"id": 1, **response}], requests=lambda r: len(r) == 1),
+            Step("corrupt entry refetches cleanly", ["classify", "--questions", "choice.json", "--cache", "cache-c", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[ok()], before=corrupt_cache,
+                 stdout=lambda o: lines_json(o) == [{"id": 1, **response}], requests=lambda r: len(r) == 1),
+            Step("refetched entry is reused", ["classify", "--questions", "choice.json", "--cache", "cache-c", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[ok()], requests=lambda r: r == []),
+        ],
         "backend-select": [
             Step("env selects base URL and model", ["classify", "--questions", "noul.json"], '{"id":1,"state":"x"}',
                  env={"JEV_BASE_URL": stub_url + "/env", "JEV_MODEL": "env-model"}, stub=[ok()],
@@ -246,6 +306,10 @@ def journeys(stub_url):
                  setup=write_unicode_sample, stdout=lambda o: json.loads(o)["api_exit_code"] == 0,
                  requests=lambda r: len(r) == 1 and r[0]["body"]["state"] == "naïve café ✓",
                  files=lambda b: json.loads((b / ".private/demo/results.jsonl").read_text(encoding="utf-8"))["id"] == "é-1"),
+            Step("rerun send reuses the demo cache, no request", ["--send"], script="scripts/demo_sessions.py",
+                 env={"JEV_BASE_URL": base}, setup=write_unicode_sample,
+                 stdout=lambda o: json.loads(o)["api_exit_code"] == 0 and json.loads(o)["unclassified"] == 0,
+                 requests=lambda r: r == [], files=demo_cache_clean),
             Step("--limit above 20 rejected before any request", ["--send", "--limit", "21"],
                  script="scripts/demo_sessions.py", env={"JEV_BASE_URL": base}, stub=[ok(DEMO_RESPONSE)], code=2,
                  stderr="--limit must be between 1 and 20", requests=lambda r: r == []),
@@ -317,6 +381,9 @@ def write_fixtures(work):
 def execute(step, build_dir, work, stub):
     stub.queue[:] = list(step.stub)
     stub.seen.clear()
+    problems = []
+    if step.before and step.before(work) is False:
+        problems.append("precondition failed")
     env = {"PATH": "/usr/bin:/bin", "HOME": str(work), "LANG": "C.UTF-8", **step.env}
     if step.setup:
         step.setup(build_dir)
@@ -328,7 +395,6 @@ def execute(step, build_dir, work, stub):
     elapsed = time.monotonic() - started
     time.sleep(0.05)
     seen = list(stub.seen)
-    problems = []
     if proc.returncode != step.code:
         problems.append(f"exit {proc.returncode}, expected {step.code}")
     if step.stderr and step.stderr not in proc.stderr:
@@ -451,7 +517,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="build fresh, drive journeys, keep evidence")
-    run.add_argument("journeys", nargs="*", help="cli-surface classify batch backend-select demo-redaction live-opencode")
+    run.add_argument("journeys", nargs="*", help="cli-surface classify batch cache backend-select demo-redaction live-opencode")
     run.add_argument("--live", action="store_true", help="add live-opencode: 3 tiny synthetic requests to OpenCode")
     run.add_argument("--ref", default="worktree", help="worktree (default) or a git ref such as HEAD")
     run.add_argument("--keep-build", action="store_true")

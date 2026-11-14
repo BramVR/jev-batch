@@ -85,6 +85,7 @@ class DemoTests(unittest.TestCase):
 
             def send(command, input, stdout, **kwargs):
                 self.assertEqual(input, raw)
+                self.assertEqual(command[-2:], ['--cache', str(folder / 'cache')])
                 for record in records:
                     stdout.write(json.dumps({'id': record['id'], 'answers': {
                         'failure_pattern': {'choice': 'fine'}}}) + '\n')

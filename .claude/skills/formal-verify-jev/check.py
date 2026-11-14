@@ -10,6 +10,7 @@ import io
 import itertools
 import json
 import os
+import shutil
 from pathlib import Path
 import re
 import subprocess
@@ -28,8 +29,8 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "d5f42da21006c75a6f8587d42a059fbcf13ce9c8",
-    "scripts/demo_sessions.py": "02f4ad2510ffaf4deab31a25016835b098953d1e",
+    "jev.py": "654da228ef38acbc73073c997554abd46d4a3066",
+    "scripts/demo_sessions.py": "5a45729868d435be631d5df31262a2218e158fb8",
 }
 KEY = "sentinel-key-not-real"
 SECRET_BODY = "SECRET-BODY-must-not-leak"
@@ -550,9 +551,10 @@ def drive_demo(c, argv, sample_lines):
     else:
         sample.write_text("".join(json.dumps(r) + "\n" for r in sample_lines))
     before = sample.read_bytes() if sample.exists() else None
-    sent = []
+    sent, commands = [], []
 
     def send(command, input=None, stdout=None, encoding=None, env=None, **kwargs):
+        commands.append(command)
         # Model a hostile locale: anything not pinned to UTF-8 on either side of the pipe is ASCII.
         try:
             received = input.encode(encoding or "ascii").decode((env or {}).get("PYTHONIOENCODING") or "ascii")
@@ -577,7 +579,7 @@ def drive_demo(c, argv, sample_lines):
     after = sample.read_bytes() if sample.exists() else None
     summary = (folder / "summary.json").read_text() if (folder / "summary.json").exists() else ""
     (folder / "summary.json").unlink(missing_ok=True)
-    return code, sent, before == after, out.getvalue() + err.getvalue() + summary
+    return code, sent, before == after, out.getvalue() + err.getvalue() + summary, commands
 
 
 def check_demo_send(c):
@@ -586,8 +588,10 @@ def check_demo_send(c):
     for opt_out in (False, True):
         c.cases += 1
         argv = ["--send", "--limit", "20"] + (["--no-redact"] if opt_out else [])
-        code, sent, kept, output = drive_demo(c, argv, raw)
+        code, sent, kept, output, commands = drive_demo(c, argv, raw)
         case = " ".join(argv)
+        if [cmd[-2:] for cmd in commands] != [["--cache", str(c.tmp / "demo-root/.private/demo/cache")]]:
+            c.fail("demo-send-caches", case, f"commands {commands}")
         if sent == [None]:
             c.fail("demo-send-utf8", case, "non-ASCII sample could not cross the pipe to jev.py")
             continue
@@ -611,13 +615,172 @@ def check_demo_send(c):
     for limit, count in itertools.product([-1, 0, 1, 2, 20, 21], [None, 0, 1, 2, 20, 21]):
         c.cases += 1
         records = None if count is None else [{"id": i, "state": "x"} for i in range(count)]
-        code, sent, kept, _ = drive_demo(c, ["--send", "--limit", str(limit)], records)
+        code, sent, kept, _, _ = drive_demo(c, ["--send", "--limit", str(limit)], records)
         allowed = 1 <= limit <= 20 and count is not None and 1 <= count <= limit
         case = f"--limit {limit}, sample {count}"
         if (code == 0 and len(sent) == 1) != allowed or (not allowed and (code != 2 or sent)):
             c.fail("demo-send-gates", case, f"exit {code}, {len(sent)} sends")
         if not kept:
             c.fail("demo-send-sample-unchanged", case, "sample bytes changed")
+
+
+# P6. Response cache: a hit iff the endpoint and request body match a stored success, never a failure.
+
+CACHE_BASES = ["http://127.0.0.1:8080/a/", "http://127.0.0.1:8080/a", "http://127.0.0.1:8080/b"]
+CACHE_MODELS = ["m1", "m2"]
+CHOICE = {"type": "choice", "criteria": {"a": "A", "b": "B"}}
+CACHE_QUESTIONS = [{"n": NOUL}, {"n": NOUL, "c": CHOICE}, {"c": CHOICE, "n": NOUL}]
+CACHE_RECORDS = [
+    '{"id":"a","state":"s"}',
+    '{"id":["b"],"state":"s"}',
+    '{"id":"a","state":"s","extra":1}',
+    '{"id":"a","state":"t"}',
+    json.dumps({"id": "a", "state": "s", "assets": ASSETS}),
+]
+CORRUPTIONS = {
+    "empty": b"",
+    "truncated": None,
+    "not_utf8": b"\xff\xfe",
+    "not_object": b"[]",
+    "wrong_version": lambda e: {**e, "version": 2},
+    "wrong_key": lambda e: {**e, "key": "0" * 64},
+    "no_response": lambda e: {k: v for k, v in e.items() if k != "response"},
+    "response_not_object": lambda e: {**e, "response": []},
+    "response_no_answers": lambda e: {**e, "response": {"model": "m"}},
+    "response_has_id": lambda e: {**e, "response": {**e["response"], "id": 1}},
+    "nonfinite": lambda e: json.dumps({**e, "response": {**e["response"], "x": "NAN"}}).replace('"NAN"', "NaN"),
+}
+
+
+def request_identity(base, model, questions, raw):
+    """The oracle's view of a request: endpoint plus body, independent of jev.py's key derivation."""
+    record = json.loads(raw)
+    body = {"model": model, "state": record["state"], "questions": questions}
+    if "assets" in record:
+        body["assets"] = record["assets"]
+    return base.rstrip("/") + "/systemone", json.dumps(body)
+
+
+def cache_entries(cache):
+    return sorted(p for p in Path(cache).rglob("*") if p.is_file())
+
+
+def check_cache(c, depth):
+    responses = lambda i, r: json.dumps(ok_response(i)).encode()
+    configs = list(itertools.product(CACHE_BASES, CACHE_MODELS, CACHE_QUESTIONS, CACHE_RECORDS))
+    for first, second in itertools.product(configs, repeat=2):
+        c.cases += 1
+        cache = c.tmp / "cache-pair"
+        shutil.rmtree(cache, ignore_errors=True)
+        runs = []
+        for (base, model, questions, raw), index in ((first, 0), (second, 5)):
+            runs.append(drive(c.jev, ["classify", "--questions", c.questions_file(questions), "--base-url", base,
+                                      "--model", model, "--cache", str(cache)], raw,
+                              respond=lambda i, r, index=index: json.dumps(ok_response(index)).encode()))
+        case = f"cache first={first} second={second}"
+        if not all(c.clean_exit("cache-clean-exit", case, r) for r in runs):
+            continue
+        hit = request_identity(*first) == request_identity(*second)
+        if (len(runs[0].requests), len(runs[1].requests)) != (1, 0 if hit else 1):
+            c.fail("cache-hit-iff-same-request", case,
+                   f"requests {len(runs[0].requests)},{len(runs[1].requests)}; expected 1,{0 if hit else 1}")
+        expected = {"id": json.loads(second[3])["id"], **ok_response(0 if hit else 5)}
+        if (runs[1].code, runs[1].stderr) != (0, "") or not same(json.loads(runs[1].stdout or "null"), expected):
+            c.fail("cache-output-current-id", case, f"exit {runs[1].code} stdout {runs[1].stdout[:160]!r}")
+
+    for mapping in CACHE_QUESTIONS:
+        wrapped = {"schema_version": 1, "questions": mapping}
+        for first, second in ((mapping, wrapped), (wrapped, mapping)):
+            c.cases += 1
+            cache = c.tmp / "cache-forms"
+            shutil.rmtree(cache, ignore_errors=True)
+            runs = [drive(c.jev, ["classify", "--questions", c.questions_file(doc), "--cache", str(cache)],
+                          f'{{"id":{i},"state":"s"}}', respond=lambda r_i, r, i=i: json.dumps(ok_response(i)).encode())
+                    for i, doc in enumerate((first, second))]
+            case = f"cache forms first={json.dumps(first)[:60]} second={json.dumps(second)[:60]}"
+            if not all(c.clean_exit("cache-clean-exit", case, r) for r in runs):
+                continue
+            if len(runs[1].requests) != 0 or not same(json.loads(runs[1].stdout or "null"), {"id": 1, **ok_response(0)}):
+                c.fail("cache-hit-across-question-file-forms", case,
+                       f"second run sent {len(runs[1].requests)}, stdout {runs[1].stdout[:120]!r}")
+
+    questions = c.questions_file({"q": NOUL})
+    for kind, (stage, line, responder) in LINE_KINDS.items():
+        if stage != "net":
+            continue
+        c.cases += 1
+        cache = c.tmp / "cache-failure"
+        shutil.rmtree(cache, ignore_errors=True)
+        argv = ["classify", "--questions", questions, "--cache", str(cache)]
+        failed = drive(c.jev, argv, line(0), respond=responder)
+        left = cache_entries(cache)
+        retry = drive(c.jev, argv, line(0), respond=responses)
+        if failed.code != 1 or left or len(retry.requests) != 1:
+            c.fail("cache-never-stores-failure", f"cache failure={kind}",
+                   f"exit {failed.code}, {len(left)} entries left, retry sent {len(retry.requests)}")
+
+    for name, corrupt in CORRUPTIONS.items():
+        c.cases += 1
+        cache = c.tmp / "cache-corrupt"
+        shutil.rmtree(cache, ignore_errors=True)
+        argv = ["classify", "--questions", questions, "--cache", str(cache)]
+        record = '{"id":"c","state":"x"}'
+        drive(c.jev, argv, record, respond=responses)
+        [entry] = cache_entries(cache)
+        good = entry.read_bytes()
+        stored = json.loads(good)
+        damage = good[:len(good) // 2] if corrupt is None else corrupt if isinstance(corrupt, bytes) else corrupt(stored)
+        entry.write_bytes(damage if isinstance(damage, bytes) else (damage if isinstance(damage, str) else json.dumps(damage)).encode())
+        refetch = drive(c.jev, argv, record, respond=lambda i, r: json.dumps(ok_response(7)).encode())
+        reuse = drive(c.jev, argv, record, respond=responses)
+        case = f"cache corrupt={name}"
+        if not (c.clean_exit("cache-clean-exit", case, refetch) and c.clean_exit("cache-clean-exit", case, reuse)):
+            continue
+        fresh = {"id": "c", **ok_response(7)}
+        if (refetch.code, len(refetch.requests)) != (0, 1) or not same(json.loads(refetch.stdout or "null"), fresh):
+            c.fail("cache-corrupt-refetch", case, f"exit {refetch.code}, {len(refetch.requests)} requests, stdout {refetch.stdout[:120]!r}")
+        if len(reuse.requests) != 0 or not same(json.loads(reuse.stdout or "null"), fresh):
+            c.fail("cache-corrupt-rewritten", case, f"third run sent {len(reuse.requests)}, stdout {reuse.stdout[:120]!r}")
+
+    for n in range(1, depth + 1):
+        for seq in itertools.product(LINE_KINDS, repeat=n):
+            c.cases += 1
+            cache = c.tmp / "cache-resume"
+            shutil.rmtree(cache, ignore_errors=True)
+            lines = [LINE_KINDS[kind][1](i) for i, kind in enumerate(seq)]
+            stored = {}
+            case = "cache resume " + ",".join(seq)
+            for attempt in ("interrupted", "resumed"):
+                sent = []
+
+                def respond(index, request):
+                    sent.append(index)
+                    kind = pending[index] if attempt == "interrupted" else "ok"
+                    responder = LINE_KINDS[kind][2]
+                    return responder(index, request) if responder else json.dumps(ok_response(index)).encode()
+
+                expected_out, pending = [], []
+                for i, kind in enumerate(seq):
+                    if LINE_KINDS[kind][0] == "local":
+                        break
+                    identity = request_identity("https://opencode.ai/zen/v1", "jev-1.13-free", {"q": NOUL}, lines[i])
+                    if identity in stored:
+                        expected_out.append({"id": json.loads(lines[i])["id"], **stored[identity]})
+                        continue
+                    pending.append(kind)
+                    if attempt == "interrupted" and LINE_KINDS[kind][0] == "net":
+                        break
+                    stored[identity] = ok_response(len(pending) - 1)
+                    expected_out.append({"id": json.loads(lines[i])["id"], **stored[identity]})
+                run = drive(c.jev, ["batch", "--questions", questions, "--cache", str(cache)],
+                            "\n".join(lines) + "\n", respond=respond)
+                if not c.clean_exit("cache-clean-exit", case, run):
+                    break
+                got = [json.loads(x) for x in run.stdout.splitlines()]
+                if len(run.requests) != len(pending):
+                    c.fail("cache-resume-sends-only-missing", case, f"{attempt}: {len(run.requests)} requests, expected {len(pending)}")
+                if not (len(got) == len(expected_out) and all(map(same, got, expected_out))):
+                    c.fail("cache-resume-output", case, f"{attempt}: stdout {run.stdout[:200]!r}")
 
 
 # Broken variants of jev.py. Each must make the named property fail, or the check proves nothing.
@@ -660,10 +823,31 @@ MUTANTS = [
     ("bad questions JSON gets the generic error", "questions-reject-message",
      [("    except (OSError, ValueError, RecursionError):\n        raise JevError(\"questions file",
        "    except OSError:\n        raise JevError(\"questions file")]),
+    ("record id part of cache key", "cache-hit-iff-same-request",
+     [("cache.path(backend.endpoint, body)", 'cache.path(backend.endpoint, body + repr(record["id"]).encode())')]),
+    ("endpoint left out of cache key", "cache-hit-iff-same-request",
+     [('f"jev-cache-v{CACHE_VERSION}\\n{endpoint}\\n"', 'f"jev-cache-v{CACHE_VERSION}\\n"')]),
+    ("cached response returned with stored id", "cache-output-current-id",
+     [('return {"id": record["id"], **cached}', 'return {**cached, "id": "cached"}')]),
+    ("failure stored and trusted", "cache-never-stores-failure",
+     [('            result = read_json(response.read().decode("utf-8"))\n',
+       '            result = read_json(response.read().decode("utf-8"))\n            cache and cache.store(entry, result)\n'),
+      ('return entry["response"] if valid_response(entry.get("response")) else None', 'return entry.get("response")')]),
+    ("corrupt entry raises", "cache-corrupt-refetch",
+     [("        except (OSError, ValueError, UnicodeError, RecursionError):\n            return None",
+       "        except FileNotFoundError:\n            return None")]),
+    ("entry fields not validated", "cache-corrupt-refetch",
+     [('entry.get("version") != CACHE_VERSION or entry.get("key") != path.stem', "False")]),
+    ("cache keyed per questions file", "cache-hit-across-question-file-forms",
+     [("cache = Cache(args.cache) if args.cache else None", "cache = Cache(args.cache / args.questions.name) if args.cache else None")]),
+    ("cache never read", "cache-resume-sends-only-missing",
+     [("cached = cache.load(entry) if entry else None", "cached = None")]),
 ]
 
 # Broken variants of scripts/demo_sessions.py, checked the same way.
 DEMO_MUTANTS = [
+    ("demo send without the cache", "demo-send-caches",
+     [(', "--cache", str(folder / "cache")]', "]")]),
     ("send skips the second redaction pass", "demo-send-redacts-outgoing",
      [('outgoing, summary["redaction"] = redact_records(records)',
        'outgoing, summary["redaction"] = records, {"policy": REDACTION_POLICY, "counts": {}}')]),
@@ -705,7 +889,8 @@ def run_all(jev, demo, depth, only=None):
         c = Checker(jev, tmp, demo)
         for name, fn in (("batch", lambda: check_batch(c, depth)), ("requests", lambda: check_requests(c)),
                          ("numbers", lambda: check_numbers(c)), ("questions", lambda: check_question_files(c)),
-                         ("redaction", lambda: (check_redaction(c), check_redact_before_cap(c), check_demo_send(c)))):
+                         ("redaction", lambda: (check_redaction(c), check_redact_before_cap(c), check_demo_send(c))),
+                         ("cache", lambda: check_cache(c, min(depth, 2)))):
             if only in (None, name):
                 fn()
         return c
@@ -744,7 +929,7 @@ def stale():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--depth", type=int, default=3, help="max batch length to enumerate (default 3)")
-    parser.add_argument("--only", choices=["batch", "requests", "numbers", "questions", "redaction"])
+    parser.add_argument("--only", choices=["batch", "requests", "numbers", "questions", "redaction", "cache"])
     parser.add_argument("--mutants", action="store_true", help="also prove each property fails on a broken jev.py")
     parser.add_argument("--stale", action="store_true", help="only report covered files whose content differs from SYNC_BLOBS")
     args = parser.parse_args()
@@ -774,7 +959,7 @@ def main():
         code = 1
 
     if args.mutants:
-        suites = [(TARGET, source, MUTANTS, "batch requests numbers questions", lambda m: (load(m), load(demo_source, DEMO))),
+        suites = [(TARGET, source, MUTANTS, "batch requests numbers questions cache", lambda m: (load(m), load(demo_source, DEMO))),
                   (DEMO, demo_source, DEMO_MUTANTS, "redaction", lambda m: (load(source), load(m, DEMO)))]
         for path, original, mutants, scope, modules in suites:
             for label, prop, edits in mutants:

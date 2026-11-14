@@ -27,6 +27,7 @@ The maintained source for verifying what a jev-cli user can observe. Read this i
 - [Question files](./question-files.md) covers version-1 and legacy question files, identical requests, and pre-HTTP rejection of bad files.
 - [Classify one record](./classify.md) covers stdin and `--input`, verbatim output, and single-request failures.
 - [Batch JSONL](./batch.md) covers ordering, duplicates, and stop-at-first-failure with preserved prefix.
+- [Response cache](./cache.md) covers `--cache` reruns with zero requests, misses on changed requests, resume after interrupt, and failed or corrupt entries.
 - [Backend selection](./backend-select.md) covers env and flag precedence, Box gating, and credential isolation.
 - [Demo redaction](./demo-redaction.md) covers `scripts/demo_sessions.py` redaction before save and before send, the old-sample second pass, opt-out, and the sample limit.
 - [Live OpenCode](./live-opencode.md) covers three synthetic requests to the free default backend.

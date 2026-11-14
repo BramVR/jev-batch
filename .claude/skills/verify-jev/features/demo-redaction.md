@@ -9,6 +9,7 @@
 - `redact-old-sample` send redacts the outgoing copy of a raw sample made before redaction existed, and the file on disk stays raw.
 - `redact-opt-out` `--no-redact` sends the sample as extracted and reports policy `disabled`.
 - `demo-utf8` send pipes the sample to `jev.py batch` as UTF-8 and pins the child's stdio to UTF-8, so non-ASCII text arrives intact even when the inherited `PYTHONIOENCODING` or locale is ASCII.
+- `demo-cache` a repeated send of the same sample hits `.private/demo/cache` and makes no request. Details in [cache.md](./cache.md).
 - `demo-limit` `--limit` outside 1..20 exits 2 before any request.
 
 ## How to get to it (user POV)
