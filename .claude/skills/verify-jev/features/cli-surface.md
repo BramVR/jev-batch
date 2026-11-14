@@ -7,13 +7,13 @@ A user gets help, clear usage errors, and local rejection of bad flags or questi
 - `help` prints usage naming `classify`, `batch`, and `--questions`, exit 0.
 - `usage-error` missing `--questions` exits 2 from argparse.
 - `timeout-guard` nonfinite or nonpositive `--timeout` exits 1.
-- `batch-input-guard` `batch --input` exits 1; batch reads stdin only.
+- `batch-input-guard` `batch --input` and `eval --input` exit 1; both read stdin only.
 - `questions-guard` empty mapping or unknown question type exits 1. Version and wrapper rules live in [question-files](./question-files.md).
 
 ## How to get to it (user POV)
 
 - `python3 jev.py --help`
-- `python3 jev.py classify|batch --questions <file> [flags]`
+- `python3 jev.py classify|batch|eval --questions <file> [flags]`
 
 ## Driving it with verify.py
 
