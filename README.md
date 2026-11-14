@@ -96,7 +96,7 @@ Redaction is on by default, under policy `jev-demo-redact-1`. Each message is re
 
 The summary holds only `redaction.policy` and per-rule `redaction.counts`, never matched text. Prepare counts cover the kept excerpts. Send counts cover the second pass, so they are zero for a sample this version prepared.
 
-Limitations. This pattern list does not detect every secret. It misses short values, unprefixed tokens, secrets without a `key=` label, names, phone numbers, addresses, and paths outside home directories. It also hits some harmless text, for example `git@github.com` reads as an email. Review the saved sample before sending, and remove anything sensitive the rules missed. Placeholders can hide the context a classifier needs.
+Limitations. This pattern list does not detect every secret. It misses short values, unprefixed tokens, tokens glued to a preceding letter or digit, secrets without a `key=` label, names, phone numbers, addresses, and paths outside home directories. It also hits some harmless text, for example `git@github.com` reads as an email. Review the saved sample before sending, and remove anything sensitive the rules missed. Placeholders can hide the context a classifier needs.
 
 To opt out, pass `--no-redact` to both the prepare and the send run. The sample is then saved and sent as extracted, the summary reports policy `disabled`, and the manual review is the only protection. The four Choice labels are heuristic, mutually exclusive judgments over excerpts; `fine` also includes insufficient evidence. Counts are not an accuracy evaluation or a full-session audit.
 
@@ -113,7 +113,7 @@ git diff --check
 
 Tests mock HTTP at the CLI boundary, checking request shape/auth, complete responses, failures, partial batch output, and credential selection. No live API credential is required for tests.
 
-Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI against a loopback System One stub, with an opt-in `--live` journey of three synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, and batch invariants over bounded inputs, and proves each check can fail on a broken `jev.py`:
+Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI and the session demo against a loopback System One stub, with an opt-in `--live` journey of three synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, batch invariants, and demo redaction over bounded inputs, and proves each check can fail on a broken `jev.py` or demo script:
 
 ```sh
 python3 .claude/skills/verify-jev/verify.py run
