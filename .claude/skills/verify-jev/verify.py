@@ -195,6 +195,9 @@ def journeys(stub_url):
         "cli-surface": [
             Step("help", ["--help"], stdout=lambda o: "classify" in o and "summarize" in o and "--question " in o
                  and "--questions" in o and "--dry-run" in o),
+            Step("help states the full retry rule", ["--help"],
+                 stdout=lambda o: "after HTTP 429 or 5xx, a connection error or timeout, or an 'Endpoint is unavailable' "
+                 "error body on a status other than 401/403/422" in " ".join(o.split())),
             Step("missing questions is a usage error", ["classify"], code=2, stderr="--questions"),
             Step("nonfinite timeout rejected", ["classify", "--questions", "noul.json", "--timeout", "inf"],
                  code=1, stderr="jev: timeout must be positive and finite"),
@@ -257,6 +260,16 @@ def journeys(stub_url):
             Step("HTTP 503 then success recovers", ["classify", "--questions", "choice.json", *stub_args],
                  '{"id":"r","state":"x"}', stub=[(503, SECRET_BODY, 0), ok()],
                  stdout=lambda o: lines_json(o) == [{"id": "r", **response}], requests=lambda r: len(r) == 2),
+            Step("HTTP 404 with the unavailable phrase is retried", ["classify", "--questions", "choice.json", *stub_args],
+                 '{"id":"u","state":"x"}', stub=[(404, SECRET_BODY + ' {"error":"Endpoint is unavailable"}', 0), ok()],
+                 stdout=lambda o: lines_json(o) == [{"id": "u", **response}], requests=lambda r: len(r) == 2),
+            Step("HTTP 404 without the phrase is not retried", ["classify", "--questions", "choice.json", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[(404, SECRET_BODY, 0), ok()], code=1,
+                 stderr="jev: System One HTTP 404; not retryable", requests=lambda r: len(r) == 1),
+            Step("HTTP 401 with the unavailable phrase is not retried",
+                 ["classify", "--questions", "choice.json", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[(401, SECRET_BODY + " Endpoint is unavailable", 0), ok()], code=1,
+                 stderr="jev: System One HTTP 401; not retryable", requests=lambda r: len(r) == 1),
             Step("HTTP 401 is not retried", ["classify", "--questions", "choice.json", *stub_args],
                  '{"id":1,"state":"x"}', stub=[(401, SECRET_BODY, 0), ok()], code=1,
                  stderr="jev: System One HTTP 401; not retryable", requests=lambda r: len(r) == 1),
