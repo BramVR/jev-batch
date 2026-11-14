@@ -24,7 +24,7 @@ Preconditions:
 
 - **All steps.** Run `python3 .claude/skills/verify-jev/verify.py run demo-redaction`. Every step prints `PASS`.
 - **Leak proof.** The stub's recorded bodies for the send steps contain none of `DEMO_SECRETS`. The `--no-redact` step shows the opposite on purpose, so the check can fail.
-- **Can fail.** `run --ref 8de76f2 demo-redaction` (before redaction) fails the first four steps, and its transcript shows the fixture values in the stub bodies. `run --ref 9ac1b3e demo-redaction` (before the UTF-8 fix) fails the UTF-8 step with `api_exit_code` 1 and no stub request.
+- **Can fail.** `run --ref 8de76f2 demo-redaction` (before redaction) fails the first four steps, and its transcript shows the fixture values in the stub bodies. `run --ref "$(git log -1 --format=%h --grep='pipe sends as UTF-8')^" demo-redaction` (before the UTF-8 fix) fails the UTF-8 step with `api_exit_code` 1 and no stub request.
 - **Unit cover.** Nested values, repeated values, false positives, redaction before the 4,000-character cap, counts past the cap, and the UTF-8 send live in `tests/test_demo.py`.
 
 ## Gotchas

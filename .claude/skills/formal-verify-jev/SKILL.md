@@ -17,14 +17,14 @@ python3 .claude/skills/formal-verify-jev/check.py --mutants    # also prove each
 python3 .claude/skills/formal-verify-jev/check.py --only redaction   # demo redaction only, <1s
 python3 .claude/skills/formal-verify-jev/check.py --only questions   # question-file versioning only, <1s
 python3 .claude/skills/formal-verify-jev/check.py --depth 4 --only batch   # deeper batch, ~20s
-python3 .claude/skills/formal-verify-jev/check.py --stale      # covered files changed since SYNC_COMMIT?
+python3 .claude/skills/formal-verify-jev/check.py --stale      # covered files changed since the last sync?
 ```
 
 Exit 0 and `PASS` means no new violations, every known finding still reproduces, and, with `--mutants`, every mutant was caught.
 
 ## Does my change touch this?
 
-Covered files: `jev.py`, all of `Backend`, `api_key`, `read_json`, `load_questions`, `classify`, `main`; `scripts/demo_sessions.py`, all of `REDACTION_RULES`, `redact`, `redact_records`, `prepare_sample`, `main`. Sync commit: `SYNC_COMMIT` in `check.py`. Run `--stale`. Any diff in a covered file since then means run the full check with `--mutants`.
+Covered files: `jev.py`, all of `Backend`, `api_key`, `read_json`, `load_questions`, `classify`, `main`; `scripts/demo_sessions.py`, all of `REDACTION_RULES`, `redact`, `redact_records`, `prepare_sample`, `main`. Sync point: `SYNC_BLOBS` in `check.py`, the git blob id of each covered file as last checked. It records content, not a commit, so rebases and squash merges keep it valid. Run `--stale`. A `CHANGED` file means run the full check with `--mutants`. `--stale` also prints the commit that last held the synced blob, when history still has it, for the diff to read.
 
 ## Properties
 
@@ -67,7 +67,7 @@ Not covered: question files bigger than the listed shapes, real sockets and TLS,
 - `KNOWN <finding>` is an accepted current violation in `KNOWN_FINDINGS`. `FIXED? <finding>` means it stopped reproducing: confirm the fix, then delete its entry.
 - `MUTANT MISSED` means a property can no longer fail on the break it guards. `MUTANT STALE` means the anchor text in `MUTANTS` or `DEMO_MUTANTS` no longer exists in `jev.py` or `scripts/demo_sessions.py`. Update the anchor to the equivalent code; never delete a mutant to get green.
 
-## Known findings at the sync commit
+## Known findings at the sync point
 
 - F1. A tab or newline in `--base-url` makes `Backend` see `api.typesafe.ai` while urllib sees a different host. `jev.py` reads credentials (env key or a Keychain lookup), then `http.client` raises `InvalidURL`, which escapes `main` as a traceback. No key is sent; the request never leaves.
 - F2. In `batch`, an API response that is not UTF-8, not JSON, or holds nonfinite numbers is reported as `invalid JSON record`, blaming the input line.
@@ -76,6 +76,6 @@ Not covered: question files bigger than the listed shapes, real sockets and TLS,
 
 1. Update the oracle and domain in `check.py` to the new contract, with README in step.
 2. Add a mutant for any new guard and confirm `--mutants` catches it.
-3. Run the full check. When it describes the code at the new commit, set `SYNC_COMMIT` to that commit's short hash.
+3. Run the full check. When it describes the code as it is now, set each `SYNC_BLOBS` entry to `git hash-object <file>`.
 
 Keep it aligned after unchecked changes with `/maintain-formal-verification-skill`.

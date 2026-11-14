@@ -26,7 +26,11 @@ ROOT = Path(__file__).resolve().parents[3]
 TARGET = ROOT / "jev.py"
 DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
-SYNC_COMMIT = "f34d8ac"
+# Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
+SYNC_BLOBS = {
+    "jev.py": "d5f42da21006c75a6f8587d42a059fbcf13ce9c8",
+    "scripts/demo_sessions.py": "02f4ad2510ffaf4deab31a25016835b098953d1e",
+}
 KEY = "sentinel-key-not-real"
 SECRET_BODY = "SECRET-BODY-must-not-leak"
 TYPESAFE_HOST = "api.typesafe.ai"
@@ -719,11 +723,21 @@ def triage(violations):
     return known, new
 
 
+def git(*args):
+    return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True).stdout.strip()
+
+
 def stale():
-    changed = subprocess.run(["git", "-C", str(ROOT), "diff", "--stat", SYNC_COMMIT, "--", *COVERED],
-                             capture_output=True, text=True, check=True).stdout.strip()
-    print(f"sync commit {SYNC_COMMIT}; covered files: {', '.join(COVERED)}")
-    print(changed or "covered files unchanged since sync commit")
+    changed = 0
+    for path in COVERED:
+        synced, current = SYNC_BLOBS.get(path), git("hash-object", path)
+        if synced == current:
+            print(f"in sync  {path} {current[:10]}")
+            continue
+        changed += 1
+        since = synced and git("log", "-1", "--format=%h", f"--find-object={synced}", "--all", "--", path)
+        print(f"CHANGED  {path} {(synced or 'unrecorded')[:10]} -> {current[:10]}"
+              + (f"; diff with: git diff {since} -- {path}" if since else "; synced blob not in history"))
     return 1 if changed else 0
 
 
@@ -732,7 +746,7 @@ def main():
     parser.add_argument("--depth", type=int, default=3, help="max batch length to enumerate (default 3)")
     parser.add_argument("--only", choices=["batch", "requests", "numbers", "questions", "redaction"])
     parser.add_argument("--mutants", action="store_true", help="also prove each property fails on a broken jev.py")
-    parser.add_argument("--stale", action="store_true", help="only report covered-file changes since SYNC_COMMIT")
+    parser.add_argument("--stale", action="store_true", help="only report covered files whose content differs from SYNC_BLOBS")
     args = parser.parse_args()
     if args.stale:
         return stale()
