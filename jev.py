@@ -78,7 +78,7 @@ def classify(record, questions, key, backend, timeout):
         if not isinstance(record["assets"], dict):
             raise JevError("assets must be an object")
         payload["assets"] = record["assets"]
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "User-Agent": "jev-cli/0.1"}
     if key:
         headers["Authorization"] = "Bearer " + key
     if "assets" in record or any(q["type"] == "box" for q in questions.values()):
