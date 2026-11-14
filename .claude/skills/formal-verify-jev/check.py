@@ -810,7 +810,9 @@ def check_summarize(c, depth):
     results.write_text(summary_line("a:1", 0) + "\n", encoding="utf-8")
     for flag, expected in ((["--cache", str(c.tmp / "summarize-cache")], "jev: summarize sends no requests; --cache is for classify and batch\n"),
                            (["--dry-run"], "jev: summarize sends no requests; --dry-run is for classify and batch\n"),
-                           (["--labels", str(results)], "jev: --labels is for eval; --question is for eval and summarize\n")):
+                           (["--labels", str(results)], "jev: --labels is for eval; --question is for eval and summarize\n"),
+                           (["--retries", "1"], "jev: summarize sends no requests; --retries and --concurrency are for classify and batch\n"),
+                           (["--concurrency", "2"], "jev: summarize sends no requests; --retries and --concurrency are for classify and batch\n")):
         c.cases += 1
         run = drive(c.jev, ["summarize", "--input", str(results), *flag], "", {"TYPESAFE_API_KEY": KEY})
         case = f"summarize {flag[0]}"
@@ -1348,6 +1350,8 @@ EVAL_ERRORS = [
      "jev: eval sends no requests; --cache is for classify and batch"),
     (['{"id":"x","label":"a"}'], [], ("--question", "r", "--dry-run"),
      "jev: eval sends no requests; --dry-run is for classify and batch"),
+    (['{"id":"x","label":"a"}'], [], ("--question", "r", "--retries", "0"), "jev: eval sends no requests; --retries and --concurrency are for classify and batch"),
+    (['{"id":"x","label":"a"}'], [], ("--question", "r", "--concurrency", "1"), "jev: eval sends no requests; --retries and --concurrency are for classify and batch"),
 ]
 
 
@@ -1554,6 +1558,8 @@ MUTANTS = [
        "        questions = read_json(args.questions.read_text(encoding=\"utf-8\"))\n        if question is None")]),
     ("summarize treated as a sending command", "summarize-flag-errors",
      [('offline = args.command in ("eval", "summarize")', 'offline = args.command == "eval"')]),
+    ("offline commands accept --retries and --concurrency", "summarize-flag-errors",
+     [("if offline and (args.retries is not None or args.concurrency is not None):", "if False:")]),
     ("summarize reads credentials", "summarize-offline",
      [("            return run_summarize(args)", "            api_key()\n            return run_summarize(args)")]),
 ]
