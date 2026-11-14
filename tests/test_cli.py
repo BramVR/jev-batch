@@ -146,7 +146,7 @@ class CliTests(unittest.TestCase):
         with patch.dict(QUESTIONS["route"], {"type": []}):
             code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}')
         self.assertEqual((code, out, sent), (1, "", []))
-        self.assertIn("supported text question types", err)
+        self.assertIn("supported question types", err)
 
     def test_help_as_process(self):
         result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "--help"], capture_output=True, text=True)

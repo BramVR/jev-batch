@@ -27,7 +27,7 @@ Batch JSONL from stdin, one independent POST per line:
 python3 jev.py batch --questions examples/failure-patterns.json < records.jsonl > results.jsonl
 ```
 
-Each input is an object with `id` and `state`. IDs are any JSON value and pass through unchanged. State accepts a string, object, or array. Extra record fields are ignored. Blank lines are errors.
+Each input is an object with `id` and `state`. IDs are any JSON value and pass through unchanged. State accepts a string, object, or array. Optional `assets` passes through the documented base64 image asset mapping. Other extra record fields are ignored. Blank lines are errors.
 
 Each output is `{ "id": <input id>, ...<full API response> }`. It includes `model`, `answers`, `usage`, all probabilities, confidence, and future response fields. No rounding or thresholding. Output order follows input order. Duplicate IDs remain duplicates.
 
@@ -41,7 +41,7 @@ The file passed to `--questions` is the questions mapping itself, without a `que
 - `score` uses `criteria` as an ordered array of level descriptions, indexed from zero. Answers include `score`, `legend`, `confidence`, and `probabilities`.
 - `noul` asks a yes/no question through `instructions`, with optional `criteria.true` and `criteria.false`. Answers contain `noul`, the probability of yes.
 
-Instructions and descriptions can be strings, objects, or arrays where documented. This CLI supports text requests only. Box requires an image asset and `TypeSafe-Danger-Zone-Images: true`; the CLI rejects Box rather than sending an incomplete request. Multipart, assets, long-context headers, retry policies, concurrency, and packaging are outside this version.
+Instructions and descriptions can be strings, objects, or arrays where documented. Box questions pass through with optional record `assets` containing image `type`, `format`, and `data_base64`. The CLI automatically sends `TypeSafe-Danger-Zone-Images: true` for assets or Box questions. Box answers retain coordinates and confidence. Multipart, long-context headers, retry policies, concurrency, and packaging are outside this version.
 
 Contracts checked 2026-11-14 against [models](https://docs.typesafe.ai/models), [System One](https://docs.typesafe.ai/api/system-one), [Choice](https://docs.typesafe.ai/primitives/choice), [Score](https://docs.typesafe.ai/primitives/score), [Noul](https://docs.typesafe.ai/primitives/noul), [Box](https://docs.typesafe.ai/primitives/box), and [OpenAPI](https://api.typesafe.ai/openapi.json). Jev's documented default limits are 64k tokens per request and 32k per question. Keep transcripts bounded.
 

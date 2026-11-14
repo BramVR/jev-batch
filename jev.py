@@ -44,13 +44,21 @@ def classify(record, questions, key, model, timeout):
         raise JevError("record must be an object with id and state")
     if not isinstance(record["state"], (str, dict, list)):
         raise JevError("state must be a string, object, or array")
+    payload = {"model": model, "state": record["state"], "questions": questions}
+    if "assets" in record:
+        if not isinstance(record["assets"], dict):
+            raise JevError("assets must be an object")
+        payload["assets"] = record["assets"]
+    headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
+    if "assets" in record or any(q["type"] == "box" for q in questions.values()):
+        headers["TypeSafe-Danger-Zone-Images"] = "true"
     body = json.dumps(
-        {"model": model, "state": record["state"], "questions": questions},
+        payload,
         allow_nan=False,
     ).encode("utf-8")
     request = urllib.request.Request(
         ENDPOINT, data=body,
-        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -85,8 +93,8 @@ def main(argv=None):
         if not isinstance(questions, dict) or not questions:
             raise JevError("questions must be a nonempty API question mapping")
         for question in questions.values():
-            if not isinstance(question, dict) or question.get("type") not in ("choice", "score", "noul"):
-                raise JevError("supported text question types: choice, score, noul; Box needs image support")
+            if not isinstance(question, dict) or question.get("type") not in ("choice", "score", "noul", "box"):
+                raise JevError("supported question types: choice, score, noul, box")
         key = api_key()
         if args.command == "classify":
             raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
