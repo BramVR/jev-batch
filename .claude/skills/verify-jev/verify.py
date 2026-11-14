@@ -395,6 +395,12 @@ def journeys(stub_url):
                  stdout=lambda o: report(o, "unknown", None) and json.loads(o)["records"][0]["request_bytes"] == UNICODE_BYTES),
             Step("Unicode send posts that many bytes (send step)", ["classify", "--questions", "noul.json", *stub_args],
                  UNICODE_RECORD, stub=[ok()], requests=lambda r: r[0]["bytes"] == UNICODE_BYTES),
+            Step("version-1 file prices the unwrapped mapping, like its legacy twin",
+                 ["classify", "--dry-run", "--questions", "noul.v1.json"], '{"id":"d-8","state":"x"}',
+                 stdout=lambda o: report(o, "free", "0") and json.loads(o)["records"][0]["request_bytes"]
+                 == len(json.dumps({"model": "jev-1.13-free", "state": "x", "questions": NOUL}).encode())),
+            Step("unknown schema_version rejected as a send would be", ["classify", "--dry-run", "--questions", "v2.json"],
+                 '{"id":1,"state":"x"}', code=1, stderr="jev: unsupported questions schema_version", stdout=lambda o: o == ""),
             Step("invalid line 2 stops with no report", ["batch", "--dry-run", "--questions", "noul.json"],
                  '{"id":1,"state":"a"}\n{not json\n', code=1,
                  stderr="jev: batch stopped at line 2; invalid JSON record", stdout=lambda o: o == ""),
