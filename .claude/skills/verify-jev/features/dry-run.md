@@ -11,6 +11,7 @@
 - `dry-run-assets` a record with image `assets` is flagged `assets_not_estimated`, and the cost becomes `null`.
 - `dry-run-invalid` the first invalid batch line exits 1 with `batch stopped at line N` and no report.
 - `dry-run-cache` `--dry-run --cache DIR` ignores the cache: no read, no write, every record priced as if sent. Driven in the `cache` journey.
+- `dry-run-eval` `eval --dry-run` exits 1; eval sends nothing to price. Driven in the `eval` journey.
 - `dry-run-gating` Box on the free model is rejected exactly as a send would be.
 - `dry-run-question-files` a version-1 question file prices only its unwrapped mapping, byte for byte like its legacy twin, and an unknown `schema_version` is rejected as a send would be. See [question-files](./question-files.md).
 
