@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Redact secrets, bearer and API tokens, emails, and Unix/Windows home paths from demo samples before caching and again before sending, on by default with `--no-redact` to opt out; summaries report only policy and counts.
+
 - Accept version-1 question documents (`schema_version` plus `questions`) alongside legacy raw mappings, and reject unknown versions, empty mappings, and malformed question files before any request with non-private errors.
 
 - Reuse the approved private session sample for demo sends, cap samples at 20, and report category counts and example IDs; verify eight real OpenCode classifications without committing excerpts.

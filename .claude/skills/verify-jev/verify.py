@@ -30,6 +30,13 @@ ASSETS = {"shot": {"type": "image", "format": "png", "data_base64": "iVBORw0KGgo
 STUB_RESPONSE = ('{"model":"stub-model","answers":{"topic":{"type":"choice","choice":"bug",'
                  '"confidence":0.30000000000000004,"probabilities":{"billing":0.1,"bug":0.30000000000000004,'
                  '"other":0.6}}},"usage":{"input_tokens":12,"output_tokens":3},"future_field":[1e-7,-0.0]}')
+DEMO_RESPONSE = '{"model":"stub-model","answers":{"failure_pattern":{"type":"choice","choice":"fine","probabilities":{"fine":1.0}}}}'
+# Synthetic look-alikes planted in a fake ~/.codex session; none may reach the stub unless --no-redact.
+DEMO_SECRETS = ["synthBearerTokenValue0123456789", "sk-synthetic0000aaaa1111bbbb2222", "synthPasswordValue42",
+                "fixture.person@example.test", "fixtureunixuser", "FixtureWinUser"]
+DEMO_TEXT = (f"curl -H 'Authorization: Bearer {DEMO_SECRETS[0]}' key {DEMO_SECRETS[1]} password={DEMO_SECRETS[2]} "
+             f"mail {DEMO_SECRETS[3]} at /Users/{DEMO_SECRETS[4]}/notes and C:\\Users\\{DEMO_SECRETS[5]}\\Desktop")
+DEMO_PLACEHOLDERS = ["[REDACTED:bearer]", "[REDACTED:token]", "[REDACTED:secret]", "[REDACTED:email]", "[REDACTED:home]"]
 
 
 @dataclass
@@ -44,6 +51,9 @@ class Step:
     stderr: str = ""
     requests: object = None
     timeout: float = 30
+    script: str = "jev.py"
+    setup: object = None
+    files: object = None
 
 
 # Stub System One: a real HTTP server on 127.0.0.1 reached through the user-facing --base-url.
@@ -90,6 +100,26 @@ def lines_json(out):
 
 def paths(reqs):
     return [r["path"] for r in reqs]
+
+
+def clean(text):
+    return not any(secret in text for secret in DEMO_SECRETS)
+
+
+def sample(build_dir):
+    return (build_dir / ".private/demo/sample.jsonl").read_text()
+
+
+def write_unicode_sample(build_dir):
+    path = build_dir / ".private/demo/sample.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"id": "é-1", "state": "naïve café ✓"}, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def write_old_sample(build_dir):
+    path = build_dir / ".private/demo/sample.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"id": "old-1", "state": {"messages": [{"role": "user", "text": DEMO_TEXT}]}}) + "\n")
 
 
 def journeys(stub_url):
@@ -189,6 +219,37 @@ def journeys(stub_url):
                                                      "--base-url", "https://u:p@api.typesafe.ai/v1"],
                  '{"id":1,"state":"x"}', code=1, stderr="jev: base URL must be an HTTP(S) URL without credentials"),
         ],
+        "demo-redaction": [
+            Step("prepare saves only placeholders and reports counts", [], script="scripts/demo_sessions.py",
+                 stdout=lambda o: clean(o) and json.loads(o)["redaction"] == {"policy": "jev-demo-redact-1", "counts": {
+                     "assignment": 1, "bearer": 1, "email": 1, "home_path": 2, "token": 1}},
+                 files=lambda b: clean(sample(b)) and all(p in sample(b) for p in DEMO_PLACEHOLDERS)),
+            Step("send keeps sample, stub sees no fixture value", ["--send"], script="scripts/demo_sessions.py",
+                 env={"JEV_BASE_URL": base}, stub=[ok(DEMO_RESPONSE)],
+                 stdout=lambda o: clean(o) and json.loads(o)["classification_counts"]["fine"] == 1
+                 and json.loads(o)["redaction"]["counts"] == {},
+                 requests=lambda r: len(r) == 1 and clean(json.dumps(r[0]["body"]))
+                 and "[REDACTED:home]" in json.dumps(r[0]["body"]),
+                 files=lambda b: clean(sample(b))),
+            Step("send redacts outgoing copy of an older raw sample", ["--send"], script="scripts/demo_sessions.py",
+                 env={"JEV_BASE_URL": base}, stub=[ok(DEMO_RESPONSE)], setup=write_old_sample,
+                 stdout=lambda o: clean(o) and json.loads(o)["redaction"]["counts"]["bearer"] == 1,
+                 requests=lambda r: len(r) == 1 and clean(json.dumps(r[0]["body"])),
+                 files=lambda b: DEMO_SECRETS[0] in sample(b)),
+            Step("--no-redact sends the sample as extracted", ["--send", "--no-redact"],
+                 script="scripts/demo_sessions.py", env={"JEV_BASE_URL": base}, stub=[ok(DEMO_RESPONSE)],
+                 stdout=lambda o: json.loads(o)["redaction"] == {"policy": "disabled", "counts": {}},
+                 requests=lambda r: len(r) == 1 and DEMO_SECRETS[3] in json.dumps(r[0]["body"]),
+                 setup=write_old_sample),
+            Step("send is UTF-8 even when inherited stdio is ASCII", ["--send"], script="scripts/demo_sessions.py",
+                 env={"JEV_BASE_URL": base, "PYTHONIOENCODING": "ascii"}, stub=[ok(DEMO_RESPONSE)],
+                 setup=write_unicode_sample, stdout=lambda o: json.loads(o)["api_exit_code"] == 0,
+                 requests=lambda r: len(r) == 1 and r[0]["body"]["state"] == "naïve café ✓",
+                 files=lambda b: json.loads((b / ".private/demo/results.jsonl").read_text(encoding="utf-8"))["id"] == "é-1"),
+            Step("--limit above 20 rejected before any request", ["--send", "--limit", "21"],
+                 script="scripts/demo_sessions.py", env={"JEV_BASE_URL": base}, stub=[ok(DEMO_RESPONSE)], code=2,
+                 stderr="--limit must be between 1 and 20", requests=lambda r: r == []),
+        ],
     }
 
 
@@ -229,7 +290,7 @@ def build(run_dir, ref):
         archive = subprocess.run(["git", "-C", str(ROOT), "archive", ref], capture_output=True, check=True).stdout
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
             tar.extractall(target, filter="data")
-    subprocess.run([sys.executable, "-m", "compileall", "-q", "jev.py"], cwd=target, check=True)
+    subprocess.run([sys.executable, "-m", "compileall", "-q", "jev.py", "scripts"], cwd=target, check=True)
     return target
 
 
@@ -244,14 +305,23 @@ def write_fixtures(work):
                         "broken.json": '{"billing": {"type": "noul"',
                         "record.json": {"id": {"ticket": 7}, "state": {"subject": "App crashes on save"}}}.items():
         (work / name).write_text(value if isinstance(value, str) else json.dumps(value), encoding="utf-8")
+    # Fake HOME session read by scripts/demo_sessions.py; synthetic text only, never a real session.
+    sessions = work / ".codex/sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "synthetic.jsonl").write_text("".join(json.dumps(line) + "\n" for line in (
+        {"type": "session_meta", "payload": {"id": "synthetic-session", "cwd": "/elsewhere"}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                              "content": [{"type": "input_text", "text": DEMO_TEXT}]}})), encoding="utf-8")
 
 
 def execute(step, build_dir, work, stub):
     stub.queue[:] = list(step.stub)
     stub.seen.clear()
     env = {"PATH": "/usr/bin:/bin", "HOME": str(work), "LANG": "C.UTF-8", **step.env}
-    # Fixture files live in `work`; the CLI runs from there as `python3 <build>/jev.py ...`.
-    cmd = [sys.executable, str(build_dir / "jev.py"), *step.argv]
+    if step.setup:
+        step.setup(build_dir)
+    # Fixture files live in `work`; the CLI runs from there as `python3 <build>/<script> ...`.
+    cmd = [sys.executable, str(build_dir / step.script), *step.argv]
     started = time.monotonic()
     proc = subprocess.run(cmd, input=step.stdin, capture_output=True, text=True, cwd=work, env=env,
                           timeout=step.timeout)
@@ -267,13 +337,14 @@ def execute(step, build_dir, work, stub):
         problems.append("stderr not empty on success")
     if "Traceback" in proc.stderr or SECRET_BODY in proc.stderr + proc.stdout or SENTINEL_KEY in proc.stdout:
         problems.append("traceback, private body, or key leaked to output")
-    for label, check, value in (("stdout", step.stdout, proc.stdout), ("requests", step.requests, seen)):
+    for label, check, value in (("stdout", step.stdout, proc.stdout), ("requests", step.requests, seen),
+                                ("files", step.files, build_dir)):
         try:
             if check and not check(value):
                 problems.append(f"{label} check failed")
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
+        except (ValueError, KeyError, IndexError, TypeError, OSError) as exc:
             problems.append(f"{label} check raised {type(exc).__name__}: {exc}")
-    shown = " ".join(["python3", "jev.py", *step.argv])
+    shown = " ".join(["python3", step.script, *step.argv])
     return {"step": step.name, "command": shown, "stdin": step.stdin, "env": sorted(step.env),
             "exit": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr, "seconds": round(elapsed, 2),
             "stub_requests": [{k: r[k] for k in ("path", "body")} | {"headers": {
@@ -380,7 +451,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="build fresh, drive journeys, keep evidence")
-    run.add_argument("journeys", nargs="*", help="cli-surface classify batch backend-select live-opencode")
+    run.add_argument("journeys", nargs="*", help="cli-surface classify batch backend-select demo-redaction live-opencode")
     run.add_argument("--live", action="store_true", help="add live-opencode: 3 tiny synthetic requests to OpenCode")
     run.add_argument("--ref", default="worktree", help="worktree (default) or a git ref such as HEAD")
     run.add_argument("--keep-build", action="store_true")

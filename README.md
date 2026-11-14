@@ -79,9 +79,26 @@ After reviewing the saved sample and obtaining authorization to send it to the s
 python3 scripts/demo_sessions.py --send
 ```
 
-`--send` reuses the exact existing `.private/demo/sample.jsonl` without resampling or rewriting it. Missing samples fail before transmission. `--limit` must be between 1 and 20; an existing sample larger than the limit is rejected without truncation. Running without `--send` prepares and replaces the sample.
+`--send` reuses the exact existing `.private/demo/sample.jsonl` without resampling or rewriting it, and pipes it to `jev.py batch` as UTF-8 whatever the locale. Missing samples fail before transmission. `--limit` must be between 1 and 20; an existing sample larger than the limit is rejected without truncation. Running without `--send` prepares and replaces the sample.
 
-The script retains trailing user and assistant messages up to 24,000 characters, caps each message at 4,000 characters, and omits tools and reasoning. It writes raw inputs, API results, and the counts and example IDs by category beneath ignored `.private/demo/`. Do not commit those files. Review sample excerpts for secrets before sending. The four Choice labels are heuristic, mutually exclusive judgments over excerpts; `fine` also includes insufficient evidence. Counts are not an accuracy evaluation or a full-session audit.
+The script retains trailing user and assistant messages up to 24,000 characters, caps each message at 4,000 characters, and omits tools and reasoning. It writes the redacted inputs, API results, and the counts and example IDs by category beneath ignored `.private/demo/`. Do not commit those files.
+
+### Redaction
+
+Redaction is on by default, under policy `jev-demo-redact-1`. Each message is redacted whole, before the 4,000-character cap, the 24,000-character budget, and the write to `sample.jsonl`, so a cut cannot leave part of a match behind. `--send` leaves the saved sample unchanged and redacts the outgoing copy again, which also protects samples prepared before redaction existed. Every string value in a record is redacted, nested objects and arrays included. Record IDs, object keys, non-string values, and structure stay unchanged. The rules run in this order, on Python `re` syntax:
+
+- `private_key`: `-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----` through the matching `END` line, or to the end of the text, becomes `[REDACTED:private_key]`.
+- `bearer`: `bearer` (any case) and whitespace, then 8 or more of `[A-Za-z0-9._~+/=-]`. The value becomes `[REDACTED:bearer]`.
+- `token`: `sk-` + 16 or more `[A-Za-z0-9_-]`, `gh[pousr]_` + 20 or more alphanumerics, `github_pat_` + 20 or more, `xox[abprs]-` + 10 or more, `AKIA` + 16 `[0-9A-Z]`, `AIza` + 35, and three-part `eyJ...` JWTs. Each becomes `[REDACTED:token]`.
+- `assignment`: `api_key`, `api-key`, `apikey`, `secret`, `token`, `password`, `passwd`, or `access_key` (any case), then `:` or `=`, optional quotes, and 8 or more characters other than whitespace, quotes, `,`, or `;`. The value becomes `[REDACTED:secret]`.
+- `email`: `local@domain.tld` addresses become `[REDACTED:email]`.
+- `home_path`: `/Users/<name>`, `/home/<name>`, and `X:\Users\<name>` (either slash) become `[REDACTED:home]` when they do not follow a word character, `.`, `:`, or a slash. The rest of the path stays.
+
+The summary holds only `redaction.policy` and per-rule `redaction.counts`, never matched text. Prepare counts are the complete placeholders in the saved excerpts, so a match past the 4,000-character cap, or a placeholder the cap cuts, is not counted. Send counts cover the second pass, so they are zero for a sample this version prepared.
+
+Limitations. This pattern list does not detect every secret. It misses short values, unprefixed tokens, tokens glued to a preceding letter or digit, secrets without a `key=` label, names, phone numbers, addresses, and paths outside home directories. It also hits some harmless text, for example `git@github.com` reads as an email. Review the saved sample before sending, and remove anything sensitive the rules missed. Placeholders can hide the context a classifier needs.
+
+To opt out, pass `--no-redact` to both the prepare and the send run. The sample is then saved and sent as extracted, the summary reports policy `disabled`, and the manual review is the only protection. The four Choice labels are heuristic, mutually exclusive judgments over excerpts; `fine` also includes insufficient evidence. Counts are not an accuracy evaluation or a full-session audit.
 
 The agent workflow lives in [SKILL.md](SKILL.md). Local demo status lives in [docs/demo.md](docs/demo.md).
 
@@ -96,7 +113,7 @@ git diff --check
 
 Tests mock HTTP at the CLI boundary, checking request shape/auth, complete responses, failures, partial batch output, and credential selection. No live API credential is required for tests.
 
-Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI against a loopback System One stub, with an opt-in `--live` journey of three synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, and batch invariants over bounded inputs, and proves each check can fail on a broken `jev.py`:
+Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI and the session demo against a loopback System One stub, with an opt-in `--live` journey of three synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, batch invariants, question-file versioning, and demo redaction over bounded inputs, and proves each check can fail on a broken `jev.py` or demo script:
 
 ```sh
 python3 .claude/skills/verify-jev/verify.py run

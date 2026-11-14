@@ -1,29 +1,30 @@
 ---
 name: formal-verify-jev
-description: "Exhaustively check jev.py contracts over bounded input spaces: System One request shape and credential isolation, exact probability passthrough, JSONL batch prefix and flush invariants, question-file versioning. Use when changing jev.py classify/main/Backend/read_json/api_key/load_questions, or before trusting a change to request, number, batch, or question-file handling."
+description: "Exhaustively check jev.py and demo redaction contracts over bounded input spaces: System One request shape and credential isolation, exact probability passthrough, JSONL batch prefix and flush invariants, question-file versioning, redaction coverage, idempotence, cap order, and demo send gates. Use when changing jev.py classify/main/Backend/read_json/api_key/load_questions or scripts/demo_sessions.py redaction, prepare, or send, or before trusting a change to request, number, batch, question-file, or redaction handling."
 ---
 
-# Formal verification of jev.py contracts
+# Formal verification of jev.py and demo redaction contracts
 
-`check.py` enumerates every combination in a stated finite domain and runs the real `jev.main` on each, in-process, with `urllib.request.urlopen` replaced by a scripted responder. No network, no deps. It reports each property in the code's terms and flags any change in known findings.
+`check.py` enumerates every combination in a stated finite domain and runs the real `jev.main` on each, in-process, with `urllib.request.urlopen` replaced by a scripted responder. For the demo it runs the real `redact`, `redact_records`, `prepare_sample`, and `main` from `scripts/demo_sessions.py`, with `ROOT` moved to a temp dir and the inner `jev.py` subprocess replaced by a recorder that encodes and decodes the pipe as ASCII unless the call pins UTF-8. No network, no deps. It reports each property in the code's terms and flags any change in known findings.
 
 Tool choice. Python has no practical code-level verifier for this program: CrossHair-style symbolic execution stalls in `json` and `urllib`, and nothing here is concurrent, so a TLA+ model adds nothing. Bounded exhaustive enumeration over hand-picked equivalence classes drives the real code instead of a model of it. The pass covers the enumerated domain, not every string.
 
 ## Run
 
 ```sh
-python3 .claude/skills/formal-verify-jev/check.py              # all properties, batch depth 3, ~4s
-python3 .claude/skills/formal-verify-jev/check.py --mutants    # also prove each property can fail, ~40s
+python3 .claude/skills/formal-verify-jev/check.py              # all properties, batch depth 3, ~5s
+python3 .claude/skills/formal-verify-jev/check.py --mutants    # also prove each property can fail, ~20s
+python3 .claude/skills/formal-verify-jev/check.py --only redaction   # demo redaction only, <1s
 python3 .claude/skills/formal-verify-jev/check.py --only questions   # question-file versioning only, <1s
 python3 .claude/skills/formal-verify-jev/check.py --depth 4 --only batch   # deeper batch, ~20s
-python3 .claude/skills/formal-verify-jev/check.py --stale      # covered files changed since SYNC_COMMIT?
+python3 .claude/skills/formal-verify-jev/check.py --stale      # covered files changed since the last sync?
 ```
 
 Exit 0 and `PASS` means no new violations, every known finding still reproduces, and, with `--mutants`, every mutant was caught.
 
 ## Does my change touch this?
 
-Covered file: `jev.py`, all of `Backend`, `api_key`, `read_json`, `load_questions`, `classify`, `main`. Sync commit: `SYNC_COMMIT` in `check.py`. Run `--stale`. Any diff in `jev.py` since then means run the full check with `--mutants`.
+Covered files: `jev.py`, all of `Backend`, `api_key`, `read_json`, `load_questions`, `classify`, `main`; `scripts/demo_sessions.py`, all of `REDACTION_RULES`, `redact`, `redact_records`, `prepare_sample`, `main`. Sync point: `SYNC_BLOBS` in `check.py`, the git blob id of each covered file as last checked. It records content, not a commit, so rebases and squash merges keep it valid. Run `--stale`. A `CHANGED` file means run the full check with `--mutants`. `--stale` also prints the commit that last held the synced blob, when history still has it, for the diff to read.
 
 ## Properties
 
@@ -42,20 +43,31 @@ Each property is one sentence of promise and one of harm.
 - `questions-accept-iff-valid`. A question file is accepted exactly when it is a nonempty mapping of supported question types, bare or inside `{"schema_version": 1, "questions": ...}` with no other keys, where the version is the integer `1` (not `True`, `1.0`, or `"1"`). Otherwise unknown versions run as if supported, or valid legacy files break.
 - `questions-unwrap-exact`. An accepted file sends exactly one request whose body keys are `model`, `state`, `questions`, and whose `questions` equals the unwrapped mapping, key order included. Otherwise wrapper metadata reaches the API or the two forms diverge.
 - `questions-reject-before-network`, `questions-reject-message`, `questions-reject-no-echo`. A rejected file exits 1 with no request, one `jev: ` line that is not the generic read error, and none of the file's content. Otherwise bad files cost a request, users get no actionable error, or private question text reaches logs.
-- `*-clean-exit`. No input in scope escapes `main` as an uncaught exception.
+- `redact-no-fixture-survives`. Each planted secret, in every context and nesting shape, leaves no trace of its sensitive part. Otherwise the demo sends it.
+- `redact-counts-exact`. Each planted secret adds exactly one hit to its own rule. Otherwise the summary misreports what was removed, or rules overlap and double-count.
+- `redact-idempotent`. A second pass changes nothing and counts nothing. Otherwise re-redacting at send corrupts placeholders and inflates counts.
+- `redact-structure-kept` and `redact-id-kept`. Keys, key order, non-string values, and record IDs stay unchanged, in `redact_records` and in the outgoing batch. Otherwise results cannot be joined back to sessions.
+- `redact-metadata-no-leak`. Redaction metadata, extra record fields, stdout, stderr, and `summary.json` never contain a planted value. Otherwise the diagnostics leak what redaction removed.
+- `redact-benign-unchanged`. Ordinary text near the patterns, such as `the token is useful`, URL paths with `/home/`, and short `sk-` words, is left alone. Otherwise the classifier sees noise.
+- `redact-before-cap`. A secret straddling the 4,000-character message cap at every cut point leaves no 6-character run of its sensitive part in the prepared sample. Otherwise truncation leaves a partial secret that no rule matches.
+- `redact-counts-kept`. Prepare counts equal the complete placeholders in the saved excerpts: one hit for a secret well inside the cap, none for one wholly past it, and none for a placeholder the cap cuts. Otherwise the summary reports redactions the saved sample does not contain.
+- `demo-send-redacts-outgoing` and `demo-opt-out-sends-raw`. `--send` redacts the outgoing copy of a raw saved sample, and `--send --no-redact` sends it as is. Otherwise old samples leak or the opt-out is silently ignored.
+- `demo-send-utf8`. Non-ASCII sample text reaches `jev.py batch` unchanged when everything not pinned to UTF-8 is modeled as ASCII, on both the parent's pipe and the child's stdio. Otherwise sends fail or mangle text on a non-UTF-8 locale.
+- `demo-send-sample-unchanged` and `demo-send-gates`. `--send` never rewrites or resamples `sample.jsonl`, and it sends exactly when `1 <= --limit <= 20` and the sample exists with `1..limit` records, else exit 2 and no send. Otherwise approval and sample-size limits are bypassed.
+- `*-clean-exit`. No input in scope escapes `main`, `redact`, or the demo's `main` as an uncaught exception.
 
-Domain and bounds, all in `check.py`: `LINE_KINDS` (17 line outcomes) at every sequence length up to `--depth`; `BASE_URLS` x `MODELS` x `QUESTION_SETS` x `RECORDS` x key present or absent; `FINITE` + `NONFINITE` in three response slots for both commands; `question_documents()` (`MAPPINGS` bare and wrapped, reordered, or with an extra key under every `VERSIONS` value, plus missing-key wrappers and `RAW_FILES` such as invalid JSON, non-UTF-8, nonfinite numbers, and 100k-deep nesting) for both commands. The fake `urlopen` builds an `http.client.HTTPConnection` from the request host, so urllib's host validation runs as in production.
+Domain and bounds, all in `check.py`: `LINE_KINDS` (17 line outcomes) at every sequence length up to `--depth`; `BASE_URLS` x `MODELS` x `QUESTION_SETS` x `RECORDS` x key present or absent; `FINITE` + `NONFINITE` in three response slots for both commands; `question_documents()` (`MAPPINGS` bare and wrapped, reordered, or with an extra key under every `VERSIONS` value, plus missing-key wrappers and `RAW_FILES` such as invalid JSON, non-UTF-8, nonfinite numbers, and 100k-deep nesting) for both commands; `SECRETS` (20 look-alikes covering every rule) and `BENIGN` (13 near misses) x `CONTEXTS` (7) x `SHAPES` (4 nestings); every cut point of every secret at the cap, plus the secret wholly past and wholly inside it; `--limit` in {-1, 0, 1, 2, 20, 21} x sample missing or 0, 1, 2, 20, 21 records. The fake `urlopen` builds an `http.client.HTTPConnection` from the request host, so urllib's host validation runs as in production.
 
-Not covered: question files bigger than the listed shapes, real sockets and TLS, `api_key`'s Keychain path (mocked as absent), argparse beyond what the cases hit, huge inputs, and live API behavior. `verify-jev` drives the real process and network path.
+Not covered: question files bigger than the listed shapes, real sockets and TLS, `api_key`'s Keychain path (mocked as absent), argparse beyond what the cases hit, huge inputs, and live API behavior. Redaction is proven only for the listed look-alikes. Secrets the rules do not target, such as unprefixed tokens or a token glued to a preceding word character (`keysk-...`), pass through by design. The 24,000-character budget and session file discovery are exercised only through `prepare_sample` with one session. `verify-jev` drives the real process and network path.
 
 ## Reading results
 
 - `FAIL <property>: <case>` is a new violation with its first counterexample. The case string is the input: batch line kinds in order, or the base URL, model, question IDs, record, and key flag. Reproduce it by running `jev.py` with those inputs before calling it a bug.
 - A bug in the code makes a property fail on a plausible input. A modeling error makes it fail because the oracle in `check.py` is wrong, for example a fixture serialized differently from what a user would write. Fix the oracle only when the README contract says the code's behavior is correct, and say so in the commit.
 - `KNOWN <finding>` is an accepted current violation in `KNOWN_FINDINGS`. `FIXED? <finding>` means it stopped reproducing: confirm the fix, then delete its entry.
-- `MUTANT MISSED` means a property can no longer fail on the break it guards. `MUTANT STALE` means the anchor text in `MUTANTS` no longer exists in `jev.py`. Update the anchor to the equivalent code; never delete a mutant to get green.
+- `MUTANT MISSED` means a property can no longer fail on the break it guards. `MUTANT STALE` means the anchor text in `MUTANTS` or `DEMO_MUTANTS` no longer exists in `jev.py` or `scripts/demo_sessions.py`. Update the anchor to the equivalent code; never delete a mutant to get green.
 
-## Known findings at the sync commit
+## Known findings at the sync point
 
 - F1. A tab or newline in `--base-url` makes `Backend` see `api.typesafe.ai` while urllib sees a different host. `jev.py` reads credentials (env key or a Keychain lookup), then `http.client` raises `InvalidURL`, which escapes `main` as a traceback. No key is sent; the request never leaves.
 - F2. In `batch`, an API response that is not UTF-8, not JSON, or holds nonfinite numbers is reported as `invalid JSON record`, blaming the input line.
@@ -64,6 +76,6 @@ Not covered: question files bigger than the listed shapes, real sockets and TLS,
 
 1. Update the oracle and domain in `check.py` to the new contract, with README in step.
 2. Add a mutant for any new guard and confirm `--mutants` catches it.
-3. Run the full check. When it describes the code at the new commit, set `SYNC_COMMIT` to that commit's short hash.
+3. Run the full check. When it describes the code as it is now, set each `SYNC_BLOBS` entry to `git hash-object <file>`.
 
 Keep it aligned after unchecked changes with `/maintain-formal-verification-skill`.

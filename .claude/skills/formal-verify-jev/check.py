@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Bounded exhaustive contract checks for jev.py. Stdlib only, no network."""
+"""Bounded exhaustive contract checks for jev.py and demo redaction. Stdlib only, no network."""
 
 import argparse
+from collections import Counter
 import contextlib
 from dataclasses import dataclass, field
 import http.client
@@ -10,6 +11,7 @@ import itertools
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -22,8 +24,13 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[3]
 TARGET = ROOT / "jev.py"
-COVERED = ["jev.py"]
-SYNC_COMMIT = "f34d8ac"
+DEMO = ROOT / "scripts" / "demo_sessions.py"
+COVERED = ["jev.py", "scripts/demo_sessions.py"]
+# Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
+SYNC_BLOBS = {
+    "jev.py": "d5f42da21006c75a6f8587d42a059fbcf13ce9c8",
+    "scripts/demo_sessions.py": "02f4ad2510ffaf4deab31a25016835b098953d1e",
+}
 KEY = "sentinel-key-not-real"
 SECRET_BODY = "SECRET-BODY-must-not-leak"
 TYPESAFE_HOST = "api.typesafe.ai"
@@ -39,10 +46,10 @@ class Run:
     crash: str = ""
 
 
-def load(source):
-    module = types.ModuleType("jev")
-    module.__file__ = str(TARGET)
-    exec(compile(source, str(TARGET), "exec"), module.__dict__)
+def load(source, path=TARGET):
+    module = types.ModuleType(path.stem)
+    module.__file__ = str(path)
+    exec(compile(source, str(path), "exec"), module.__dict__)
     return module
 
 
@@ -99,8 +106,9 @@ def same(a, b):
 
 
 class Checker:
-    def __init__(self, jev, tmp):
+    def __init__(self, jev, tmp, demo=None):
         self.jev = jev
+        self.demo = demo
         self.tmp = Path(tmp)
         self.violations = []
         self.cases = 0
@@ -417,6 +425,201 @@ def check_question_files(c):
             c.fail("questions-reject-no-echo", case, f"stderr {run.stderr[:200]!r}")
 
 
+# P5. Demo redaction: no planted value survives, structure and IDs stay, a second pass is a no-op,
+# redaction precedes the 4000-character cap, and --send redacts its outgoing copy behind unchanged gates.
+
+# (rule that must fire, full text, sensitive part that must not survive)
+SECRETS = [
+    ("bearer", "Authorization: Bearer abcDEF0123456789xyz", "abcDEF0123456789xyz"),
+    ("bearer", "bearer sk-proj0000aaaa1111bbbb", "sk-proj0000aaaa1111bbbb"),
+    ("token", "sk-ant-api03-AAAABBBBCCCCDDDD", "AAAABBBBCCCCDDDD"),
+    ("token", "ghp_0123456789abcdefghijABCD", "0123456789abcdefghijABCD"),
+    ("token", "github_pat_11AAAAAAA0123456789_abcdef", "11AAAAAAA0123456789_abcdef"),
+    ("token", "xoxb-1234567890-abcdefghij", "1234567890-abcdefghij"),
+    ("token", "AKIAABCDEFGHIJKLMNOP", "ABCDEFGHIJKLMNOP"),
+    ("token", "AIza" + "S" * 35, "S" * 35),
+    ("token", "eyJhbGciOiJI.eyJzdWIiOiIx.c2lnbmF0dXJl", "eyJzdWIiOiIx.c2lnbmF0dXJl"),
+    ("assignment", "password=hunter2hunter2", "hunter2hunter2"),
+    ("assignment", 'API_KEY: "abcd1234efgh"', "abcd1234efgh"),
+    ("assignment", "secret='s3cr3tvalue'", "s3cr3tvalue"),
+    ("token", "api_key=sk-live0000aaaa1111bbbb", "sk-live0000aaaa1111bbbb"),
+    ("email", "jane.doe+tag@mail.example.co", "jane.doe+tag@mail.example.co"),
+    ("home_path", "/Users/janedoe/Projects", "janedoe"),
+    ("home_path", "/home/jdoe/.ssh/id_rsa", "jdoe"),
+    ("home_path", "C:\\Users\\JaneD\\Desktop", "JaneD"),
+    ("home_path", "D:/Users/JaneD/x", "JaneD"),
+    ("private_key", "-----BEGIN RSA PRIVATE KEY-----\nMIIEabc\n-----END RSA PRIVATE KEY-----", "MIIEabc"),
+    ("private_key", "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNz", "b3BlbnNz"),
+]
+BENIGN = ["The token is useful.", "a secret sauce", "password reset flow", "version 1.2.3 at 3:00",
+          "https://example.com/home/page", "src/Users/model.py", "Bearer short", "sk-short", "user@ host",
+          "C:\\Program Files\\App", "50% off, a/b", "ghp_short", ""]
+CONTEXTS = [("", ""), (" ", " "), ("x ", "."), ("(", ")"), ('"', '"'), ("\n", "\n"), ("see: ", ", ok")]
+SHAPES = [lambda t: t, lambda t: [t, 7], lambda t: {"k": t, "n": None},
+          lambda t: {"a": [{"b": [t, True]}], "c": 1.5}]
+
+
+def out_shape(out, shape):
+    """Replace the one string leaf of a SHAPES value with the marker, keeping every other value."""
+    if isinstance(out, str):
+        return "§"
+    if isinstance(out, list):
+        return [out_shape(x, shape) if isinstance(x, (str, list, dict)) else x for x in out]
+    if isinstance(out, dict):
+        return {k: out_shape(v, shape) if isinstance(v, (str, list, dict)) else v for k, v in out.items()}
+    return out
+
+
+def check_redaction(c):
+    demo = c.demo
+    for (rule, text, part), (pre, post), shape in itertools.product(SECRETS, CONTEXTS, SHAPES):
+        value = shape(pre + text + post)
+        case = f"{text!r} in {pre!r}..{post!r} shape {SHAPES.index(shape)}"
+        c.cases += 1
+        counts = Counter()
+        try:
+            out = demo.redact(value, counts)
+            again = Counter()
+            twice = demo.redact(out, again)
+        except Exception as exc:
+            c.fail("redact-clean-exit", case, repr(exc))
+            continue
+        dumped = json.dumps(out)
+        if part in dumped:
+            c.fail("redact-no-fixture-survives", case, dumped[:200])
+        if dict(counts) != {rule: 1}:
+            c.fail("redact-counts-exact", case, f"{dict(counts)} expected {{{rule!r}: 1}}")
+        if not same(twice, out) or again:
+            c.fail("redact-idempotent", case, f"second pass {dict(again)}")
+        if not same(shape("§"), out_shape(out, shape)):
+            c.fail("redact-structure-kept", case, dumped[:200])
+        records, meta = demo.redact_records([{"id": text, "state": value, "extra": [text]}])
+        if records[0]["id"] != text:
+            c.fail("redact-id-kept", case, repr(records[0]["id"]))
+        if part in json.dumps(meta) or part in json.dumps(records[0]["extra"]):
+            c.fail("redact-metadata-no-leak", case, json.dumps(meta))
+    for text, (pre, post), shape in itertools.product(BENIGN, CONTEXTS, SHAPES):
+        c.cases += 1
+        value = shape(pre + text + post)
+        counts = Counter()
+        if not same(demo.redact(value, counts), value) or counts:
+            c.fail("redact-benign-unchanged", repr(pre + text + post), dict(counts))
+
+
+# Oracle's own label map, written out rather than read from the code under test.
+LABEL_RULES = {"private_key": "private_key", "bearer": "bearer", "token": "token", "secret": "assignment",
+               "email": "email", "home": "home_path"}
+
+
+def check_redact_before_cap(c):
+    home = c.tmp / "home"
+    sessions = home / ".codex/sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    for rule, text, part in SECRETS:
+        # cut 0: wholly past the cap; 1..len-1: straddles it; -500: wholly kept.
+        for cut in [-500, *range(0, len(text))]:
+            c.cases += 1
+            message = "x" * (3999 - max(cut, 0) - (500 if cut < 0 else 0)) + " " + text
+            (sessions / "s.jsonl").write_text("".join(json.dumps(x) + "\n" for x in (
+                {"type": "session_meta", "payload": {"id": "s", "cwd": "/elsewhere"}},
+                {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                                      "content": [{"type": "input_text", "text": message}]}})))
+            counts = Counter()
+            with patch.dict(os.environ, {"HOME": str(home)}):
+                records = c.demo.prepare_sample(1, counts)
+            saved = json.dumps(records)
+            case = f"{text!r} with {cut} chars before the cap"
+            leaked = [part[i:i + 6] for i in range(len(part) - 5) if part[i:i + 6] in saved]
+            if leaked:
+                c.fail("redact-before-cap", case, leaked[0])
+            kept = Counter(LABEL_RULES[label] for m in records[0]["state"]["messages"]
+                           for label in re.findall(r"\[REDACTED:(\w+)\]", m["text"]) if label in LABEL_RULES)
+            if counts != kept or (cut < 0 and counts != {rule: 1}) or (cut == 0 and counts):
+                c.fail("redact-counts-kept", case, f"counts {dict(counts)}, saved placeholders {dict(kept)}")
+
+
+def drive_demo(c, argv, sample_lines):
+    root = c.tmp / "demo-root"
+    folder = root / ".private/demo"
+    folder.mkdir(parents=True, exist_ok=True)
+    (root / "examples").mkdir(exist_ok=True)
+    (root / "examples/failure-patterns.json").write_text(json.dumps({"failure_pattern": {"criteria": {"fine": "F"}}}))
+    sample = folder / "sample.jsonl"
+    if sample_lines is None:
+        sample.unlink(missing_ok=True)
+    else:
+        sample.write_text("".join(json.dumps(r) + "\n" for r in sample_lines))
+    before = sample.read_bytes() if sample.exists() else None
+    sent = []
+
+    def send(command, input=None, stdout=None, encoding=None, env=None, **kwargs):
+        # Model a hostile locale: anything not pinned to UTF-8 on either side of the pipe is ASCII.
+        try:
+            received = input.encode(encoding or "ascii").decode((env or {}).get("PYTHONIOENCODING") or "ascii")
+        except UnicodeError:
+            sent.append(None)
+            return types.SimpleNamespace(returncode=1, stderr="jev: could not read input, credentials, or API JSON")
+        sent.append(received)
+        for line in received.splitlines():
+            stdout.write(json.dumps({"id": json.loads(line)["id"], "answers": {"failure_pattern": {"choice": "fine"}}}) + "\n")
+        return types.SimpleNamespace(returncode=0, stderr="")
+
+    out, err = io.StringIO(), io.StringIO()
+    with patch.object(c.demo, "ROOT", root), patch("subprocess.run", side_effect=send), \
+            patch.object(c.demo, "prepare_sample", side_effect=AssertionError("send resampled")), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code = c.demo.main(argv)
+        except SystemExit as exc:
+            code = exc.code
+        except BaseException:
+            code = "crash: " + traceback.format_exc(limit=-1).strip()
+    after = sample.read_bytes() if sample.exists() else None
+    summary = (folder / "summary.json").read_text() if (folder / "summary.json").exists() else ""
+    (folder / "summary.json").unlink(missing_ok=True)
+    return code, sent, before == after, out.getvalue() + err.getvalue() + summary
+
+
+def check_demo_send(c):
+    raw = [{"id": f"user{i}@example.test", "state": {"messages": [{"role": "user", "text": "café ✓ " + t}]}}
+           for i, (_, t, _) in enumerate(SECRETS)]
+    for opt_out in (False, True):
+        c.cases += 1
+        argv = ["--send", "--limit", "20"] + (["--no-redact"] if opt_out else [])
+        code, sent, kept, output = drive_demo(c, argv, raw)
+        case = " ".join(argv)
+        if sent == [None]:
+            c.fail("demo-send-utf8", case, "non-ASCII sample could not cross the pipe to jev.py")
+            continue
+        if code != 0 or len(sent) != 1:
+            c.fail("demo-send-clean-exit", case, f"exit {code}, {len(sent)} sends")
+            continue
+        if not kept:
+            c.fail("demo-send-sample-unchanged", case, "sample bytes changed")
+        lines = [json.loads(x) for x in sent[0].splitlines()]
+        if [r["state"]["messages"][0]["text"][:7] for r in lines] != ["café ✓ "] * len(raw):
+            c.fail("demo-send-utf8", case, "non-ASCII text changed on the way to jev.py")
+        if [r["id"] for r in lines] != [r["id"] for r in raw]:
+            c.fail("redact-id-kept", case, "outgoing ids differ from sample ids")
+        leaked = [part for _, _, part in SECRETS if part in json.dumps([r["state"] for r in lines])]
+        if not opt_out and leaked:
+            c.fail("demo-send-redacts-outgoing", case, leaked[:3])
+        if opt_out and len(leaked) != len(SECRETS):
+            c.fail("demo-opt-out-sends-raw", case, f"{len(leaked)} of {len(SECRETS)} values sent")
+        if not opt_out and any(part in output for _, _, part in SECRETS):
+            c.fail("redact-metadata-no-leak", case, output[:200])
+    for limit, count in itertools.product([-1, 0, 1, 2, 20, 21], [None, 0, 1, 2, 20, 21]):
+        c.cases += 1
+        records = None if count is None else [{"id": i, "state": "x"} for i in range(count)]
+        code, sent, kept, _ = drive_demo(c, ["--send", "--limit", str(limit)], records)
+        allowed = 1 <= limit <= 20 and count is not None and 1 <= count <= limit
+        case = f"--limit {limit}, sample {count}"
+        if (code == 0 and len(sent) == 1) != allowed or (not allowed and (code != 2 or sent)):
+            c.fail("demo-send-gates", case, f"exit {code}, {len(sent)} sends")
+        if not kept:
+            c.fail("demo-send-sample-unchanged", case, "sample bytes changed")
+
+
 # Broken variants of jev.py. Each must make the named property fail, or the check proves nothing.
 
 MUTANTS = [
@@ -459,6 +662,33 @@ MUTANTS = [
        "    except OSError:\n        raise JevError(\"questions file")]),
 ]
 
+# Broken variants of scripts/demo_sessions.py, checked the same way.
+DEMO_MUTANTS = [
+    ("send skips the second redaction pass", "demo-send-redacts-outgoing",
+     [('outgoing, summary["redaction"] = redact_records(records)',
+       'outgoing, summary["redaction"] = records, {"policy": REDACTION_POLICY, "counts": {}}')]),
+    ("redaction after the 4000-character cap", "redact-before-cap",
+     [("                        text = redact(text, Counter())\n", "                        pass\n"),
+      ("                    text = text[:4000]\n", "                    text = redact(text[:4000], Counter())\n")]),
+    ("counts include matches past the cap", "redact-counts-kept",
+     [("text = redact(text, Counter())", "text = redact(text, early := Counter())"),
+      ("hits = Counter(RULE_BY_LABEL[label] for label in PLACEHOLDER.findall(text)) if counts", "hits = early if counts")]),
+    ("send pipe left to the locale encoding", "demo-send-utf8",
+     [('encoding="utf-8",', "text=True,")]),
+    ("jev.py stdio left to the locale encoding", "demo-send-utf8",
+     [('env={**os.environ, "PYTHONIOENCODING": "utf-8"}', "env=os.environ")]),
+    ("arrays not recursed", "redact-no-fixture-survives",
+     [("        return [redact(item, counts) for item in value]", "        return value")]),
+    ("record id redacted", "redact-id-kept",
+     [('item if key == "id" else redact(item, counts)', 'redact(item, counts)')]),
+    ("placeholder re-matched", "redact-idempotent",
+     [(r"(?!\[REDACTED)", "")]),
+    ("home path boundary dropped", "redact-benign-unchanged",
+     [(r"(?<![\w.:/\\])(?:/Users", "(?:/Users")]),
+    ("limit cap raised", "demo-send-gates",
+     [("if not 1 <= args.limit <= 20:", "if not 1 <= args.limit <= 21:")]),
+]
+
 # Violations the current code produces. Each stays listed until the code is fixed; the check fails if one disappears.
 KNOWN_FINDINGS = {
     "F1 control character in --base-url crashes with a traceback after reading credentials":
@@ -470,11 +700,12 @@ KNOWN_FINDINGS = {
 }
 
 
-def run_all(jev, depth, only=None):
+def run_all(jev, demo, depth, only=None):
     with tempfile.TemporaryDirectory() as tmp:
-        c = Checker(jev, tmp)
+        c = Checker(jev, tmp, demo)
         for name, fn in (("batch", lambda: check_batch(c, depth)), ("requests", lambda: check_requests(c)),
-                         ("numbers", lambda: check_numbers(c)), ("questions", lambda: check_question_files(c))):
+                         ("numbers", lambda: check_numbers(c)), ("questions", lambda: check_question_files(c)),
+                         ("redaction", lambda: (check_redaction(c), check_redact_before_cap(c), check_demo_send(c)))):
             if only in (None, name):
                 fn()
         return c
@@ -492,27 +723,38 @@ def triage(violations):
     return known, new
 
 
+def git(*args):
+    return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True).stdout.strip()
+
+
 def stale():
-    changed = subprocess.run(["git", "-C", str(ROOT), "diff", "--stat", SYNC_COMMIT, "--", *COVERED],
-                             capture_output=True, text=True, check=True).stdout.strip()
-    print(f"sync commit {SYNC_COMMIT}; covered files: {', '.join(COVERED)}")
-    print(changed or "covered files unchanged since sync commit")
+    changed = 0
+    for path in COVERED:
+        synced, current = SYNC_BLOBS.get(path), git("hash-object", path)
+        if synced == current:
+            print(f"in sync  {path} {current[:10]}")
+            continue
+        changed += 1
+        since = synced and git("log", "-1", "--format=%h", f"--find-object={synced}", "--all", "--", path)
+        print(f"CHANGED  {path} {(synced or 'unrecorded')[:10]} -> {current[:10]}"
+              + (f"; diff with: git diff {since} -- {path}" if since else "; synced blob not in history"))
     return 1 if changed else 0
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--depth", type=int, default=3, help="max batch length to enumerate (default 3)")
-    parser.add_argument("--only", choices=["batch", "requests", "numbers", "questions"])
+    parser.add_argument("--only", choices=["batch", "requests", "numbers", "questions", "redaction"])
     parser.add_argument("--mutants", action="store_true", help="also prove each property fails on a broken jev.py")
-    parser.add_argument("--stale", action="store_true", help="only report covered-file changes since SYNC_COMMIT")
+    parser.add_argument("--stale", action="store_true", help="only report covered files whose content differs from SYNC_BLOBS")
     args = parser.parse_args()
     if args.stale:
         return stale()
 
     source = TARGET.read_text(encoding="utf-8")
+    demo_source = DEMO.read_text(encoding="utf-8")
     started = time.monotonic()
-    c = run_all(load(source), args.depth, args.only)
+    c = run_all(load(source), load(demo_source, DEMO), args.depth, args.only)
     known, new = triage(c.violations)
     print(f"{c.cases} cases, depth {args.depth}, {time.monotonic() - started:.1f}s")
     code = 0
@@ -532,20 +774,24 @@ def main():
         code = 1
 
     if args.mutants:
-        for label, prop, edits in MUTANTS:
-            mutated = source
-            for old, new_text in edits:
-                if old not in mutated:
-                    break
-                mutated = mutated.replace(old, new_text)
-            else:
-                mc = run_all(load(mutated), min(args.depth, 2))
-                caught = any(p == prop for p, _, _ in mc.violations)
-                print(f"MUTANT {'caught' if caught else 'MISSED'}  {label} -> {prop}")
-                code = code if caught else 1
-                continue
-            print(f"MUTANT STALE  {label}: anchor {old!r} not in jev.py; update MUTANTS")
-            code = 1
+        suites = [(TARGET, source, MUTANTS, "batch requests numbers questions", lambda m: (load(m), load(demo_source, DEMO))),
+                  (DEMO, demo_source, DEMO_MUTANTS, "redaction", lambda m: (load(source), load(m, DEMO)))]
+        for path, original, mutants, scope, modules in suites:
+            for label, prop, edits in mutants:
+                mutated = original
+                for old, new_text in edits:
+                    if old not in mutated:
+                        break
+                    mutated = mutated.replace(old, new_text)
+                else:
+                    jev, demo = modules(mutated)
+                    caught = any(any(p == prop for p, _, _ in run_all(jev, demo, min(args.depth, 2), only).violations)
+                                 for only in scope.split())
+                    print(f"MUTANT {'caught' if caught else 'MISSED'}  {label} -> {prop}")
+                    code = code if caught else 1
+                    continue
+                print(f"MUTANT STALE  {label}: anchor {old!r} not in {path.name}; update the mutant list")
+                code = 1
     print("PASS" if code == 0 else "CHECK FAILED")
     return code
 
