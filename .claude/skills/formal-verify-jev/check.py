@@ -479,10 +479,13 @@ def expected_questions(document):
 
 
 def check_question_files(c):
-    for (label, document), command in itertools.product(question_documents(), ("classify", "batch")):
+    # summarize reads the same file for label order: empty input and an absent --question name isolate file loading.
+    for (label, document), command in itertools.product(question_documents(), ("classify", "batch", "summarize")):
         c.cases += 1
         case = f"questions {command} {label}"
-        run = drive(c.jev, [command, "--questions", c.questions_file(document)], '{"id":"q","state":"x"}\n',
+        summarize = command == "summarize"
+        argv = [command, "--questions", c.questions_file(document)] + (["--question", "zz"] if summarize else [])
+        run = drive(c.jev, argv, "" if summarize else '{"id":"q","state":"x"}\n',
                     respond=lambda i, r: json.dumps(ok_response(i)).encode())
         if not c.clean_exit("questions-clean-exit", case, run):
             continue
@@ -490,6 +493,10 @@ def check_question_files(c):
         expected = None if isinstance(document, bytes) else expected_questions(document)
         if (run.code == 0) != (expected is not None):
             c.fail("questions-accept-iff-valid", case, f"exit {run.code} stderr {run.stderr[:120]!r}")
+            continue
+        if expected is not None and summarize:
+            if run.requests or json.loads(run.stdout).get("records") != 0:
+                c.fail("questions-summarize-offline", case, f"{len(run.requests)} requests stdout {run.stdout[:120]!r}")
             continue
         if expected is not None:
             bodies = [json.loads(r["request"].data) for r in run.requests]
@@ -558,12 +565,13 @@ def oracle_bin(value):
 
 def check_summarize(c, depth):
     choice = {"type": "choice", "criteria": {label: label for label in SUMMARY_LABELS}}
-    files = {"seeded": c.questions_file({"q": choice}), "inferred": c.questions_file({"q": choice, "n": NOUL})}
+    files = {"seeded": c.questions_file({"q": choice}), "inferred": c.questions_file({"q": choice, "n": NOUL}),
+             "versioned": c.questions_file({"schema_version": 1, "questions": {"q": choice, "n": NOUL}})}
     # Short sequences cover every record kind; four-record sequences make the three-ID example cap bind.
     sequences = [seq for n in range(depth + 1) for seq in itertools.product(SUMMARY_KINDS, repeat=n)]
     sequences += list(itertools.product(LONG_KINDS, repeat=4))
     # inferred: no --question, a two-question file, so the name comes from the input and labels still seed.
-    for seq, mode in itertools.product(sequences, ("seeded", "plain", "inferred")):
+    for seq, mode in itertools.product(sequences, ("seeded", "plain", "inferred", "versioned")):
         n = len(seq)
         seeded = mode != "plain"
         c.cases += 1
@@ -1289,6 +1297,9 @@ MUTANTS = [
     ("labels seeded from the --question flag, not the selected question", "summarize-counts",
      [("def summarize(lines, question=None, questions=None):\n", "def summarize(lines, question=None, questions=None):\n    asked = question\n"),
       ("    if questions and question in questions:\n", "    if questions and asked in questions:\n")]),
+    ("summarize parses --questions without load_questions", "summarize-counts",
+     [("        questions = load_questions(args.questions)\n        if question is None",
+       "        questions = read_json(args.questions.read_text(encoding=\"utf-8\"))\n        if question is None")]),
     ("summarize reads credentials", "summarize-offline",
      [("            return run_summarize(args)", "            api_key()\n            return run_summarize(args)")]),
 ]
