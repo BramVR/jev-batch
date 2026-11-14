@@ -55,13 +55,15 @@ Prepare the eight most recently modified local session files with usable message
 python3 scripts/demo_sessions.py
 ```
 
-After authorization to send the excerpts to TypeSafe:
+After reviewing the saved sample and obtaining authorization to send it to the selected backend (OpenCode by default):
 
 ```sh
 python3 scripts/demo_sessions.py --send
 ```
 
-The script retains trailing user and assistant messages up to 24,000 characters, caps each message at 4,000 characters, and omits tools and reasoning. It writes raw inputs, API results, and the count/session-ID summary beneath ignored `.private/demo/`. Do not commit those files. Review sample excerpts for secrets before sending. The four Choice labels are heuristic, mutually exclusive judgments over excerpts; `fine` also includes insufficient evidence. Counts are not an accuracy evaluation or a full-session audit.
+`--send` reuses the exact existing `.private/demo/sample.jsonl` without resampling or rewriting it. Missing samples fail before transmission. `--limit` must be between 1 and 20; an existing sample larger than the limit is rejected without truncation. Running without `--send` prepares and replaces the sample.
+
+The script retains trailing user and assistant messages up to 24,000 characters, caps each message at 4,000 characters, and omits tools and reasoning. It writes raw inputs, API results, and the counts and example IDs by category beneath ignored `.private/demo/`. Do not commit those files. Review sample excerpts for secrets before sending. The four Choice labels are heuristic, mutually exclusive judgments over excerpts; `fine` also includes insufficient evidence. Counts are not an accuracy evaluation or a full-session audit.
 
 The agent workflow lives in [SKILL.md](SKILL.md). Local demo status lives in [docs/demo.md](docs/demo.md).
 
