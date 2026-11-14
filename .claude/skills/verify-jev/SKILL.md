@@ -1,11 +1,11 @@
 ---
 name: verify-jev
-description: "Drive the jev-cli command line (jev.py classify/batch) end to end against a fresh copy and capture evidence. Use after changing jev.py, its flags, backend selection, or output, or when asked to prove the CLI works."
+description: "Drive the jev-cli command line (jev.py classify/batch, scripts/demo_sessions.py) end to end against a fresh copy and capture evidence. Use after changing jev.py, the demo script or its redaction, flags, backend selection, or output, or when asked to prove the CLI works."
 ---
 
 # Verify jev-cli
 
-`jev.py` is a short-lived stdlib CLI. There is no server to keep alive. `verify.py` copies the code under test into an empty dir, runs each step as `python3 jev.py ...` in a fresh process with a scrubbed env, and points `--base-url` at a loopback stub of System One so the request the CLI actually sends is observable. Live calls to OpenCode are opt-in and limited to three tiny synthetic records.
+`jev.py` is a short-lived stdlib CLI. There is no server to keep alive. `verify.py` copies the code under test into an empty dir, runs each step as `python3 jev.py ...` or `python3 scripts/demo_sessions.py ...` in a fresh process with a scrubbed env, and points `--base-url` at a loopback stub of System One so the request the CLI actually sends is observable. Live calls to OpenCode are opt-in and limited to three tiny synthetic records.
 
 Helper: `.claude/skills/verify-jev/verify.py` (stdlib only, Python 3.9+). Run every command from the repo root.
 
@@ -22,6 +22,7 @@ Read-only. Reports Python version, git state, whether loopback can host the stub
 ```sh
 python3 .claude/skills/verify-jev/verify.py run                     # all offline journeys, worktree build
 python3 .claude/skills/verify-jev/verify.py run batch classify      # chosen journeys
+python3 .claude/skills/verify-jev/verify.py run demo-redaction      # demo redaction, synthetic HOME
 python3 .claude/skills/verify-jev/verify.py run --ref HEAD          # committed code only
 python3 .claude/skills/verify-jev/verify.py run --live live-opencode  # 3 real OpenCode requests
 ```
@@ -39,7 +40,7 @@ Live rules. Only `--live` touches the network, and only `opencode.ai/zen/v1/syst
 - `evidence/transcript.md` holds every step's command, stdin, exit code, stdout, stderr, and the requests the stub received (path, JSON body, selected headers).
 - `evidence/results.json` holds the same data plus the ref, `HEAD`, and whether live ran.
 - A proof cites the run id and the transcript section for the feature. Request shape is proven from the stub's view, not from the CLI's own output.
-- Every step also fails on a traceback, on the stub's private error body appearing in output, or on the sentinel key appearing in stdout.
+- Every step also fails on a traceback, on the stub's private error body appearing in output, or on the sentinel key appearing in stdout. A step's `files` check reads the build after it runs, such as the demo's saved sample.
 
 ## Cleanup
 

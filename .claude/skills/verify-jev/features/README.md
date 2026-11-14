@@ -6,7 +6,7 @@ The maintained source for verifying what a jev-cli user can observe. Read this i
 
 - `python3 .claude/skills/verify-jev/verify.py doctor` exits 0.
 - Each journey runs on a fresh copy under `.private/verify/<run-id>/build` with env reduced to `PATH`, `HOME`, `LANG`, plus what the step sets.
-- Fixture files (`noul.json`, `choice.json`, `box.json`, `empty.json`, `weird.json`, `record.json`, plus the question-file fixtures `noul.v1.json`, `v2.json`, `extra.v1.json`, `empty.v1.json`, `broken.json`) are written into the run's `work/` dir, which is the CLI's cwd.
+- Fixture files (`noul.json`, `choice.json`, `box.json`, `empty.json`, `weird.json`, `record.json`, plus the question-file fixtures `noul.v1.json`, `v2.json`, `extra.v1.json`, `empty.v1.json`, `broken.json`) are written into the run's `work/` dir, which is the CLI's cwd. The same dir is `HOME` and holds one synthetic `.codex/sessions/synthetic.jsonl` for the demo journey.
 - Offline journeys reach System One only through the loopback stub via `--base-url` or `JEV_BASE_URL`.
 
 ## Driving conventions
@@ -28,4 +28,5 @@ The maintained source for verifying what a jev-cli user can observe. Read this i
 - [Classify one record](./classify.md) covers stdin and `--input`, verbatim output, and single-request failures.
 - [Batch JSONL](./batch.md) covers ordering, duplicates, and stop-at-first-failure with preserved prefix.
 - [Backend selection](./backend-select.md) covers env and flag precedence, Box gating, and credential isolation.
+- [Demo redaction](./demo-redaction.md) covers `scripts/demo_sessions.py` redaction before save and before send, the old-sample second pass, opt-out, and the sample limit.
 - [Live OpenCode](./live-opencode.md) covers three synthetic requests to the free default backend.
