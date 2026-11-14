@@ -35,14 +35,15 @@ EVAL_RESULTS = "".join(json.dumps({"id": i, "answers": {"topic": {"type": "choic
                                           ("e3", "other", {}), ("e5", "bug", {"confidence": 0.9})))
 def choice_result(id_, choice, **answer):
     return json.dumps({"id": id_, "model": "stub-model", "answers": {"topic": {
-        "type": "choice", "choice": choice, **answer, "probabilities": {"billing": 0.2, "bug": 0.5, "other": 0.3}}}})
+        "type": "choice", "choice": choice, **answer, "probabilities": {"billing": 0.2, "bug": 0.5, "other": 0.3}}}},
+        ensure_ascii=False)
 
 
 RESULTS = "".join(line + "\n" for line in [
     choice_result("r-1", "bug", confidence=0), choice_result("r-2", "bug", confidence=1),
     choice_result("r-3", "bug", confidence=0.1), choice_result("r-4", "bug", confidence=0.95),
     choice_result("r-5", "billing"), choice_result("r-6", "billing", confidence="high"),
-    choice_result("r-7", "billing", confidence=1.5)])
+    choice_result("r-7\u2028", "billing", confidence=1.5)])
 STUB_RESPONSE = ('{"model":"stub-model","answers":{"topic":{"type":"choice","choice":"bug",'
                  '"confidence":0.30000000000000004,"probabilities":{"billing":0.1,"bug":0.30000000000000004,'
                  '"other":0.6}}},"usage":{"input_tokens":12,"output_tokens":3},"future_field":[1e-7,-0.0]}')
@@ -352,13 +353,16 @@ def journeys(stub_url):
                  stderr='jev: line 6: confidence "high" is not a number\njev: line 7: confidence 1.5 is outside [0, 1]\n',
                  stdout=lambda o: (lambda s: s["question"] == "topic" and s["records"] == 7
                                    and s["counts"] == {"billing": 3, "bug": 4, "other": 0}
-                                   and s["examples"] == {"billing": ["r-5", "r-6", "r-7"], "bug": ["r-1", "r-2", "r-3"],
+                                   and s["examples"] == {"billing": ["r-5", "r-6", "r-7\u2028"], "bug": ["r-1", "r-2", "r-3"],
                                                          "other": []}
                                    and s["confidence"]["bins"]["0.0-0.1"] == 1 and s["confidence"]["bins"]["0.1-0.2"] == 1
                                    and s["confidence"]["bins"]["0.9-1.0"] == 2 and sum(s["confidence"]["bins"].values()) == 4
                                    and (s["confidence"]["missing"], s["confidence"]["malformed"],
                                         s["confidence"]["out_of_range"]) == (1, 1, 1))(json.loads(o)),
                  requests=lambda r: r == []),
+            Step("question inferred from input, labels seeded from multi-question file",
+                 ["summarize", "--questions", "mixed.json", "--input", "results.jsonl"], stderr="jev: line 6",
+                 stdout=lambda o: json.loads(o)["counts"] == {"billing": 3, "bug": 4, "other": 0}),
             Step("stdin works without --questions", ["summarize"], RESULTS,
                  stderr="jev: line 6", stdout=lambda o: json.loads(o)["counts"] == {"bug": 4, "billing": 3}),
             Step("several question names need --question", ["summarize"],
@@ -530,6 +534,7 @@ def write_fixtures(work):
                         "extra.v1.json": {"schema_version": 1, "questions": NOUL, "note": SECRET_BODY},
                         "empty.v1.json": {"schema_version": 1, "questions": {}},
                         "broken.json": '{"billing": {"type": "noul"',
+                        "mixed.json": {**CHOICE, **NOUL},
                         "record.json": {"id": {"ticket": 7}, "state": {"subject": "App crashes on save"}}}.items():
         (work / name).write_text(value if isinstance(value, str) else json.dumps(value), encoding="utf-8")
     # Fake HOME session read by scripts/demo_sessions.py; synthetic text only, never a real session.

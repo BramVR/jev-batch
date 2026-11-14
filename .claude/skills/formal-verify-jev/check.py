@@ -557,22 +557,29 @@ def oracle_bin(value):
 
 
 def check_summarize(c, depth):
-    questions = c.questions_file({"q": {"type": "choice", "criteria": {label: label for label in SUMMARY_LABELS}}})
+    choice = {"type": "choice", "criteria": {label: label for label in SUMMARY_LABELS}}
+    files = {"seeded": c.questions_file({"q": choice}), "inferred": c.questions_file({"q": choice, "n": NOUL})}
     # Short sequences cover every record kind; four-record sequences make the three-ID example cap bind.
     sequences = [seq for n in range(depth + 1) for seq in itertools.product(SUMMARY_KINDS, repeat=n)]
     sequences += list(itertools.product(LONG_KINDS, repeat=4))
-    for seq, seeded in itertools.product(sequences, (True, False)):
+    # inferred: no --question, a two-question file, so the name comes from the input and labels still seed.
+    for seq, mode in itertools.product(sequences, ("seeded", "plain", "inferred")):
         n = len(seq)
+        seeded = mode != "plain"
         c.cases += 1
         lines = [summary_line(kind, i) for i, kind in enumerate(seq)]
-        argv = ["summarize", "--question", "q", "--base-url", "https://api.typesafe.ai/v1"]
-        run = drive(c.jev, argv + (["--questions", questions] if seeded else []),
+        argv = ["summarize", "--base-url", "https://api.typesafe.ai/v1"] + ([] if mode == "inferred" else ["--question", "q"])
+        run = drive(c.jev, argv + (["--questions", files[mode]] if seeded else []),
                     "".join(line + "\n" for line in lines), {"TYPESAFE_API_KEY": KEY})
-        case = f"summarize seeded={seeded} " + ",".join(seq)
+        case = f"summarize {mode} " + ",".join(seq)
         if not c.clean_exit("summarize-clean-exit", case, run):
             continue
         if run.requests or run.key_reads:
             c.fail("summarize-offline", case, f"{len(run.requests)} requests, {run.key_reads} credential reads")
+        if mode == "inferred" and n == 0:
+            if run.code != 1 or run.stdout or "select one question with --question" not in run.stderr:
+                c.fail("summarize-selection", case, f"exit {run.code} stderr {run.stderr!r}")
+            continue
         parse_bad = [i for i, kind in enumerate(seq) if kind in ("bad_json", "no_id")]
         answer_bad = [i for i, kind in enumerate(seq) if kind == "score"]
         if parse_bad or answer_bad:
@@ -1279,6 +1286,9 @@ MUTANTS = [
     ("boolean confidence binned as a number", "summarize-confidence-classes",
      [("if isinstance(value, bool) or not isinstance(value, (int, float)):", "if not isinstance(value, (int, float)):")]),
     ("example IDs unbounded", "summarize-examples", [("        if len(bucket) < 3:\n", "        if True:\n")]),
+    ("labels seeded from the --question flag, not the selected question", "summarize-counts",
+     [("def summarize(lines, question=None, questions=None):\n", "def summarize(lines, question=None, questions=None):\n    asked = question\n"),
+      ("    if questions and question in questions:\n", "    if questions and asked in questions:\n")]),
     ("summarize reads credentials", "summarize-offline",
      [("            return run_summarize(args)", "            api_key()\n            return run_summarize(args)")]),
 ]
