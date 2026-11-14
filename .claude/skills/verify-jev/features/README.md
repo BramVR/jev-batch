@@ -23,10 +23,10 @@ The maintained source for verifying what a jev-cli user can observe. Read this i
 
 ## Features
 
-- [CLI surface](./cli-surface.md) covers help, usage errors, and local validation of questions and flags.
+- [CLI surface](./cli-surface.md) covers help, usage errors, and local validation of questions, retry, and concurrency flags.
 - [Question files](./question-files.md) covers version-1 and legacy question files, identical requests, and pre-HTTP rejection of bad files.
-- [Classify one record](./classify.md) covers stdin and `--input`, verbatim output, and single-request failures.
-- [Batch JSONL](./batch.md) covers ordering, duplicates, and stop-at-first-failure with preserved prefix.
+- [Classify one record](./classify.md) covers stdin and `--input`, verbatim output, retried and permanent request failures.
+- [Batch JSONL](./batch.md) covers ordering, duplicates, retries, the concurrency bound, and stop-at-first-failure with preserved prefix.
 - [Eval against hand labels](./eval.md) covers exact metrics, denominators, offline guarantee, and input errors.
 - [Summarize results](./summarize.md) covers offline label counts, example IDs, confidence bins, and their diagnostics.
 - [Response cache](./cache.md) covers `--cache` reruns with zero requests, misses on changed requests, resume after interrupt, and failed or corrupt entries.

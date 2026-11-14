@@ -5,10 +5,12 @@ A user gets help, clear usage errors, and local rejection of bad flags or questi
 ## Sub-features
 
 - `help` prints usage naming `classify`, `batch`, `summarize`, `--questions`, `--question`, and `--dry-run`, exit 0.
+- `help-retry-rule` the `--retries` help names every retry case: 429, 5xx, connection errors, timeouts, and the `Endpoint is unavailable` body on statuses other than 401/403/422. Keep it in step with README when the policy changes.
 - `usage-error` `classify`, `batch`, or `eval` without `--questions` exits 2 from argparse.
 - `timeout-guard` nonfinite or nonpositive `--timeout` exits 1.
 - `batch-input-guard` `batch --input` and `eval --input` exit 1; both read stdin only.
 - `questions-guard` empty mapping or unknown question type exits 1, with or without `--dry-run`. Version and wrapper rules live in [question-files](./question-files.md).
+- `retry-concurrency-guard` `--concurrency` outside 1..32 or `--retries` outside 0..10 exits 1 with no request sent; a non-integer value exits 2 from argparse. `eval` and `summarize` send nothing, so they reject either flag with exit 1, as they reject `--cache` and `--dry-run`. `--dry-run` accepts them and ignores them.
 
 ## How to get to it (user POV)
 

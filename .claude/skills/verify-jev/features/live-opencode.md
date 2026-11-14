@@ -25,5 +25,5 @@ Preconditions:
 ## Gotchas
 
 - The free model returns coarse values, often integer `0`/`1` probabilities and `0.99` for Noul. Checks accept ints.
-- Network flakiness fails the step with `connection failed or timed out`. The CLI never retries, so rerun once before calling it a regression.
+- The CLI retries connection errors, timeouts, 429, 5xx, and `Endpoint is unavailable` bodies up to 3 times. A step that still fails with `gave up after 4 attempts` points at the backend or network; rerun once before calling it a regression.
 - Never add session data or real user text to `LIVE`.

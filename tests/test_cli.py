@@ -1,7 +1,9 @@
 import contextlib
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import email.utils
 import io
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import threading
 import json
 import os
@@ -9,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 import urllib.error
@@ -129,15 +132,118 @@ class CliTests(unittest.TestCase):
         self.assertIn("line 2", err)
         self.assertEqual(len(sent), 1)
 
-    def test_http_errors_do_not_echo_private_body_or_retry(self):
-        for status in (401, 422, 429, 529):
-            error = urllib.error.HTTPError(jev.DEFAULT_BASE_URL + "/systemone", status, "private", {}, io.BytesIO(b"secret"))
-            code, out, err, sent = self.run_cli('{"id":1,"state":"private"}', "classify", error)
+    def http_error(self, status, body=b"secret", headers=None):
+        return urllib.error.HTTPError(jev.DEFAULT_BASE_URL + "/systemone", status, "private",
+                                      headers or {}, io.BytesIO(body))
+
+    def test_permanent_http_errors_fail_once_without_echoing_body(self):
+        # The unavailable phrase never makes auth or validation failures retryable.
+        for status, body in ((400, b"secret"), (404, b"secret"), (401, b"secret Endpoint is unavailable"),
+                             (403, b"secret Endpoint is unavailable"), (422, b"secret Endpoint is unavailable")):
+            code, out, err, sent = self.run_cli('{"id":1,"state":"private"}', "classify", self.http_error(status, body))
             self.assertEqual((code, out), (1, ""))
-            self.assertIn(str(status), err)
+            self.assertIn(f"HTTP {status}; not retryable", err)
             self.assertNotIn("secret", err)
             self.assertNotIn("private", err)
             self.assertEqual(len(sent), 1)
+
+    def test_transient_errors_retry_up_to_the_limit(self):
+        cases = [lambda _: self.http_error(429), lambda _: self.http_error(503), lambda _: self.http_error(529),
+                 lambda _: self.http_error(404, b'secret {"error":{"message":"Endpoint is unavailable"}}'),
+                 lambda _: urllib.error.URLError("refused"), lambda _: TimeoutError()]
+        with patch("random.uniform", return_value=0):
+            for error in cases:
+                for retries in (0, 2):
+                    code, out, err, sent = self.run_cli('{"id":1,"state":"private"}', "classify", error,
+                                                        extra=["--retries", str(retries)])
+                    self.assertEqual((code, out), (1, ""))
+                    self.assertEqual(len(sent), retries + 1)
+                    self.assertIn(f"gave up after {retries + 1} attempt", err)
+                    self.assertNotIn("secret", err)
+
+    def test_exhausted_batch_line_keeps_flushed_prefix(self):
+        calls = []
+
+        def http(request, timeout):
+            calls.append(json.loads(request.data)["state"])
+            if len(calls) > 1:
+                raise self.http_error(503)
+            return contextlib.closing(io.BytesIO(json.dumps(RESPONSE).encode()))
+
+        with tempfile.TemporaryDirectory() as tmp, patch("random.uniform", return_value=0):
+            questions = Path(tmp) / "q.json"
+            questions.write_text(json.dumps(QUESTIONS))
+            out, err = io.StringIO(), io.StringIO()
+            with patch("sys.stdin", io.StringIO('{"id":1,"state":"a"}\n{"id":2,"state":"b"}\n{"id":3,"state":"c"}\n')), \
+                 patch("urllib.request.urlopen", side_effect=http), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = jev.main(["batch", "--questions", str(questions), "--retries", "2"])
+        self.assertEqual(code, 1)
+        self.assertEqual([json.loads(x)["id"] for x in out.getvalue().splitlines()], [1])
+        self.assertEqual(err.getvalue(), "jev: batch stopped at line 2; System One HTTP 503; gave up after 3 attempts\n")
+        self.assertEqual(calls, ["a", "b", "b", "b"])
+
+    def test_concurrency_bound_and_input_order(self):
+        lock, active, peak, calls = threading.Lock(), [0], [0], []
+
+        def http(request, timeout):
+            state = json.loads(request.data)["state"][0]
+            with lock:
+                calls.append(state)
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            try:
+                time.sleep(0.02 * (5 - state % 5))
+                return contextlib.closing(io.BytesIO(json.dumps({"answers": {}, "n": state}).encode()))
+            finally:
+                with lock:
+                    active[0] -= 1
+
+        records = "".join(json.dumps({"id": i, "state": [i]}) + "\n" for i in range(12))
+        with tempfile.TemporaryDirectory() as tmp:
+            questions = Path(tmp) / "q.json"
+            questions.write_text(json.dumps(QUESTIONS))
+            for concurrency in (1, 3):
+                out = io.StringIO()
+                peak[0] = 0
+                with patch("sys.stdin", io.StringIO(records)), patch("urllib.request.urlopen", side_effect=http), \
+                     contextlib.redirect_stdout(out):
+                    code = jev.main(["batch", "--questions", str(questions), "--concurrency", str(concurrency)])
+                self.assertEqual(code, 0)
+                self.assertEqual([json.loads(x) for x in out.getvalue().splitlines()],
+                                 [{"id": i, "answers": {}, "n": i} for i in range(12)])
+                self.assertEqual(peak[0], concurrency)
+
+    def test_invalid_retry_and_concurrency_options_fail_before_sending(self):
+        for extra, message in ((["--concurrency", "0"], "concurrency must be between 1 and 32"),
+                               (["--concurrency", "33"], "concurrency must be between 1 and 32"),
+                               (["--retries", "-1"], "retries must be between 0 and 10"),
+                               (["--retries", "11"], "retries must be between 0 and 10")):
+            code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}', extra=extra)
+            self.assertEqual((code, out, sent), (1, "", []))
+            self.assertIn(message, err)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exit_:
+            jev.main(["batch", "--questions", "q.json", "--concurrency", "two"])
+        self.assertEqual(exit_.exception.code, 2)
+        for command in ("eval", "summarize"):
+            for extra in (["--retries", "1"], ["--concurrency", "2"]):
+                code, out, err, sent = self.run_cli("", command, extra=extra)
+                self.assertEqual((code, out, sent), (1, "", []))
+                self.assertIn(f"{command} sends no requests; --retries and --concurrency are for classify and batch", err)
+        code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}\n', extra=["--dry-run", "--concurrency", "2", "--retries", "0"])
+        self.assertEqual((code, err, sent), (0, "", []))
+        self.assertTrue(json.loads(out)["dry_run"])
+
+    def test_retry_after_seconds_and_http_date(self):
+        self.assertEqual(jev.retry_after_seconds("7"), 7)
+        self.assertIsNone(jev.retry_after_seconds("soon"))
+        self.assertIsNone(jev.retry_after_seconds("-1"))
+        self.assertEqual(jev.retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT"), 0)
+        later = email.utils.format_datetime(datetime.now(timezone.utc) + timedelta(seconds=90), usegmt=True)
+        self.assertTrue(80 < jev.retry_after_seconds(later) <= 90)
+        self.assertEqual(jev.backoff_seconds(1, 120), jev.BACKOFF_CAP_SECONDS)
+        with patch("random.uniform", side_effect=lambda low, high: high):
+            self.assertEqual([jev.backoff_seconds(n, None) for n in (1, 2, 3, 8)], [0.5, 1, 2, jev.BACKOFF_CAP_SECONDS])
 
     def test_invalid_json_state_and_timeout(self):
         for raw in ('secret malformed', '{"id":1,"state":null}', '{"id":1,"state":[NaN]}', '{"id":1,"state":[1e400]}'):
@@ -196,6 +302,47 @@ class CliTests(unittest.TestCase):
             finally:
                 server.shutdown()
                 worker.join()
+
+    def test_process_batch_retries_429_then_503_in_input_order(self):
+        script = [(429, {"Retry-After": "1"}), (503, {})]
+        received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                state = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["state"]
+                status, headers = script.pop(0) if script else (200, {})
+                received.append((state, status))
+                self.send_response(status)
+                for name, value in headers.items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(json.dumps(RESPONSE).encode() if status == 200 else b"secret upstream body")
+
+            def log_message(self, *args):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server, tempfile.TemporaryDirectory() as tmp:
+            worker = threading.Thread(target=server.serve_forever)
+            worker.start()
+            try:
+                path = Path(tmp) / "q.json"
+                path.write_text(json.dumps(QUESTIONS))
+                started = time.monotonic()
+                run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "batch", "--questions", str(path),
+                                      "--base-url", f"http://127.0.0.1:{server.server_port}/v1",
+                                      "--concurrency", "2", "--retries", "2"],
+                                     cwd=ROOT, env={"PATH": os.environ["PATH"]},
+                                     input="".join(json.dumps({"id": i, "state": f"s{i}"}) + "\n" for i in range(3)),
+                                     capture_output=True, text=True, timeout=20)
+                elapsed = time.monotonic() - started
+            finally:
+                server.shutdown()
+                worker.join()
+        self.assertEqual((run.returncode, run.stderr), (0, ""))
+        self.assertEqual([json.loads(x) for x in run.stdout.splitlines()], [{"id": i, **RESPONSE} for i in range(3)])
+        self.assertEqual([status for _, status in received], [429, 503, 200, 200, 200])
+        self.assertEqual(sorted(state for state, status in received if status == 200), ["s0", "s1", "s2"])
+        self.assertGreaterEqual(elapsed, 1)
 
     def test_malformed_question_type_is_clean_error(self):
         with patch.dict(QUESTIONS["route"], {"type": []}):
@@ -374,8 +521,10 @@ class CliTests(unittest.TestCase):
             return urllib.error.HTTPError("x", 503, "busy", {}, io.BytesIO(b"")) if json.loads(request.data)["state"] == "s2" else RESPONSE
 
         with tempfile.TemporaryDirectory() as cache:
-            code, out, err, sent = self.run_cli(data, response=fail_third, extra=["--cache", cache])
-            self.assertEqual((code, len(out.splitlines()), len(sent)), (1, 2, 3))
+            with patch("random.uniform", return_value=0):
+                code, out, err, sent = self.run_cli(data, response=fail_third, extra=["--cache", cache, "--retries", "1"])
+            self.assertEqual((code, len(out.splitlines())), (1, 2))
+            self.assertEqual([json.loads(r.data)["state"] for r, _ in sent], ["s0", "s1", "s2", "s2"])
             self.assertIn("line 3", err)
             code, out, err, sent = self.run_cli(data, extra=["--cache", cache])
             self.assertEqual((code, err), (0, ""))

@@ -40,7 +40,8 @@ Live rules. Only `--live` touches the network. `--dry-run` steps target real hos
 - `evidence/transcript.md` holds every step's command, stdin, exit code, stdout, stderr, and the requests the stub received (path, JSON body, selected headers).
 - `evidence/results.json` holds the same data plus the ref, `HEAD`, and whether live ran.
 - A proof cites the run id and the transcript section for the feature. Request shape is proven from the stub's view, not from the CLI's own output.
-- Every step also fails on a traceback, on the stub's private error body appearing in output, or on the sentinel key appearing in stdout. A step's `files` check reads the build after it runs, such as the demo's saved sample.
+- Every step also fails on a traceback, on the stub's private error body appearing in output, or on the sentinel key appearing in stdout. A step's `files` check reads the build after it runs, such as the demo's saved sample. A step with `min_seconds` also fails when the run finished sooner, which proves a `Retry-After` wait.
+- Stub queue entries are `(status, body, delay)` with an optional fourth item of response headers. Each recorded request carries `in_flight`, the number of requests the stub was handling when it arrived.
 
 ## Cleanup
 

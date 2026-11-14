@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import types
@@ -30,7 +31,7 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "09217c5cef03cf4a124c851ce648e9a8a0df07a0",
+    "jev.py": "5580bfa2f1660955209f6bf32e42f9c21280a3e9",
     "scripts/demo_sessions.py": "aefdd89b19f0dc1fb55430cdf2227387b93c7bab",
 }
 KEY = "sentinel-key-not-real"
@@ -46,6 +47,7 @@ class Run:
     requests: list = field(default_factory=list)
     key_reads: int = 0
     crash: str = ""
+    peak: int = 0
 
 
 def load(source, path=TARGET):
@@ -55,13 +57,19 @@ def load(source, path=TARGET):
     return module
 
 
-def drive(jev, argv, stdin="", env=None, respond=None):
-    """Run jev.main in-process with urlopen replaced by `respond(index, request)`."""
+def drive(jev, argv, stdin="", env=None, respond=None, waits=None, jitter=lambda low, high: 0):
+    """Run jev.main in-process with urlopen replaced by `respond(index, request)`.
+
+    Requests may arrive from worker threads. Backoff jitter is `jitter` (default: no wait). With `waits`,
+    retry waits are recorded instead of slept; use it only for single-threaded classify runs.
+    """
     out_bytes = io.BytesIO()
     out = io.TextIOWrapper(out_bytes, encoding="utf-8", newline="\n", write_through=False)
     err = io.StringIO()
     run = Run(None, "", "")
     real_api_key = jev.api_key
+    lock = threading.Lock()
+    active = [0]
 
     def api_key():
         run.key_reads += 1
@@ -70,18 +78,34 @@ def drive(jev, argv, stdin="", env=None, respond=None):
     def urlopen(request, timeout):
         # http.client validates the host when it builds a connection; mirror that without a socket.
         http.client.HTTPConnection(request.host)
-        run.requests.append({"request": request, "timeout": timeout,
-                             "lines_flushed": out_bytes.getvalue().count(b"\n")})
-        body = respond(len(run.requests) - 1, request)
-        return contextlib.closing(io.BytesIO(body))
+        with lock:
+            active[0] += 1
+            run.peak = max(run.peak, active[0])
+            index = len(run.requests)
+            run.requests.append({"request": request, "timeout": timeout,
+                                 "lines_flushed": out_bytes.getvalue().count(b"\n")})
+        try:
+            return contextlib.closing(io.BytesIO(respond(index, request)))
+        finally:
+            with lock:
+                active[0] -= 1
+
+    def wait(event, seconds=None):
+        waits.append(seconds)
+        return event.is_set()
 
     keychain = types.SimpleNamespace(returncode=1, stdout="", stderr="")
-    with patch.dict(os.environ, env or {}, clear=True), \
-         patch.object(jev, "api_key", api_key), \
-         patch("subprocess.run", return_value=keychain), \
-         patch("urllib.request.urlopen", side_effect=urlopen), \
-         patch("sys.stdin", io.StringIO(stdin)), \
-         patch("sys.stdout", out), contextlib.redirect_stderr(err):
+    with contextlib.ExitStack() as stack:
+        if waits is not None:
+            stack.enter_context(patch.object(threading.Event, "wait", wait))
+        stack.enter_context(patch("random.uniform", side_effect=jitter))
+        stack.enter_context(patch.dict(os.environ, env or {}, clear=True))
+        stack.enter_context(patch.object(jev, "api_key", api_key))
+        stack.enter_context(patch("subprocess.run", return_value=keychain))
+        stack.enter_context(patch("urllib.request.urlopen", side_effect=urlopen))
+        stack.enter_context(patch("sys.stdin", io.StringIO(stdin)))
+        stack.enter_context(patch("sys.stdout", out))
+        stack.enter_context(contextlib.redirect_stderr(err))
         try:
             run.code = jev.main(argv)
         except SystemExit as exc:
@@ -134,31 +158,44 @@ class Checker:
         return True
 
 
-# P1. JSONL batch: output is exactly the response-merged prefix before the first failing line.
+# P1. JSONL batch: output is exactly the response-merged prefix before the first failing line, at every
+# retry limit and concurrency bound in scope. Each sendable line carries its position in `state`, so the
+# responder and the oracle know which line a request belongs to however threads interleave.
 
-def ok_response(index):
-    return {"model": "m", "answers": {"q": {"type": "noul", "noul": 1 / (index + 3)}},
-            "usage": {"input_tokens": index}, "request_index": index}
+def ok_response(position):
+    return {"model": "m", "answers": {"q": {"type": "noul", "noul": 1 / (position + 3)}},
+            "usage": {"input_tokens": position}, "request_index": position}
 
 
-def http_error(index, request):
-    raise urllib.error.HTTPError(request.full_url, 500, "boom", {}, io.BytesIO(SECRET_BODY.encode()))
+def http_status(status, retry_after=None):
+    def respond(attempt, request):
+        headers = http.client.HTTPMessage()
+        if retry_after is not None:
+            headers["Retry-After"] = retry_after
+        raise urllib.error.HTTPError(request.full_url, status, "boom", headers, io.BytesIO(SECRET_BODY.encode()))
+    return respond
 
 
 def raiser(exc):
-    def respond(index, request):
+    def respond(attempt, request):
         raise exc
     return respond
 
 
 def body(text):
-    return lambda index, request: text.encode("utf-8") if isinstance(text, str) else text
+    return lambda attempt, request: text.encode("utf-8") if isinstance(text, str) else text
 
 
+def first_then_ok(responder):
+    return lambda attempt, request: responder(attempt, request) if attempt == 0 else None
+
+
+# name: (stage, line factory(position), responder(attempt, request) or None for success)
+# Stages: ok; local (never sent); transient (retried, fails every attempt); permanent (sent once);
+# flaky (fails once with a retryable error, then succeeds).
 LINE_KINDS = {
-    # name: (stage, line factory(position), responder or None)
-    "ok": ("ok", lambda i: json.dumps({"id": [f"r{i}", i, None, [i], {"i": i}][i % 5], "state": f"s{i}"}), None),
-    "ok_dup_id": ("ok", lambda i: '{"id":"dup","state":{"t":"x"}}', None),
+    "ok": ("ok", lambda i: json.dumps({"id": [f"r{i}", i, None, [i], {"i": i}][i % 5], "state": f"p{i}"}), None),
+    "ok_dup_id": ("ok", lambda i: json.dumps({"id": "dup", "state": {"t": f"p{i}"}}), None),
     "blank": ("local", lambda i: "", None),
     "bad_json": ("local", lambda i: "{", None),
     "nan_in_record": ("local", lambda i: '{"id":1,"state":NaN}', None),
@@ -166,57 +203,141 @@ LINE_KINDS = {
     "not_object": ("local", lambda i: "[1]", None),
     "no_state": ("local", lambda i: '{"id":1}', None),
     "number_state": ("local", lambda i: '{"id":1,"state":3}', None),
-    "http_500": ("net", lambda i: '{"id":"h","state":"x"}', http_error),
-    "conn_refused": ("net", lambda i: '{"id":"c","state":"x"}', raiser(urllib.error.URLError("refused"))),
-    "timeout": ("net", lambda i: '{"id":"t","state":"x"}', raiser(TimeoutError())),
-    "resp_not_json": ("net", lambda i: '{"id":"j","state":"x"}', body(SECRET_BODY)),
-    "resp_not_utf8": ("net", lambda i: '{"id":"u","state":"x"}', body(b"\xff\xfe")),
-    "resp_no_answers": ("net", lambda i: '{"id":"a","state":"x"}', body('{"model":"m"}')),
-    "resp_id_collision": ("net", lambda i: '{"id":"i","state":"x"}', body('{"id":9,"answers":{}}')),
-    "resp_infinity": ("net", lambda i: '{"id":"f","state":"x"}', body('{"answers":{"q":{"noul":1e999}}}')),
+    "http_500": ("transient", lambda i: json.dumps({"id": "h", "state": f"p{i}"}), http_status(500)),
+    "http_429": ("transient", lambda i: json.dumps({"id": "r", "state": f"p{i}"}), http_status(429, "0")),
+    "conn_refused": ("transient", lambda i: json.dumps({"id": "c", "state": f"p{i}"}),
+                     raiser(urllib.error.URLError("refused"))),
+    "timeout": ("transient", lambda i: json.dumps({"id": "t", "state": f"p{i}"}), raiser(TimeoutError())),
+    "flaky_503": ("flaky", lambda i: json.dumps({"id": "f", "state": f"p{i}"}), first_then_ok(http_status(503))),
+    "http_401": ("permanent", lambda i: json.dumps({"id": "a", "state": f"p{i}"}), http_status(401)),
+    "resp_not_json": ("permanent", lambda i: json.dumps({"id": "j", "state": f"p{i}"}), body(SECRET_BODY)),
+    "resp_not_utf8": ("permanent", lambda i: json.dumps({"id": "u", "state": f"p{i}"}), body(b"\xff\xfe")),
+    "resp_no_answers": ("permanent", lambda i: json.dumps({"id": "a", "state": f"p{i}"}), body('{"model":"m"}')),
+    "resp_id_collision": ("permanent", lambda i: json.dumps({"id": "i", "state": f"p{i}"}), body('{"id":9,"answers":{}}')),
+    "resp_infinity": ("permanent", lambda i: json.dumps({"id": "f", "state": f"p{i}"}),
+                      body('{"answers":{"q":{"noul":1e999}}}')),
 }
+
+# (concurrency, retries, max depth). Depth 0 means the --depth argument.
+BATCH_MODES = [(1, 0, 0), (1, 2, 0), (2, 1, 2), (3, 2, 2)]
+
+
+def line_position(request):
+    state = json.loads(request.data)["state"]
+    return int((state if isinstance(state, str) else state["t"])[1:])
+
+
+def outcome(stage, retries):
+    """(succeeds, attempts) for one sent line."""
+    if stage == "ok":
+        return True, 1
+    if stage == "flaky":
+        return (True, 2) if retries else (False, 1)
+    if stage == "transient":
+        return False, retries + 1
+    return False, 1
 
 
 def check_batch(c, depth):
     questions = c.questions_file({"q": {"type": "noul", "instructions": "billing?"}})
-    for n in range(1, depth + 1):
-        for seq in itertools.product(LINE_KINDS, repeat=n):
+    for concurrency, retries, max_depth in BATCH_MODES:
+        for n in range(1, (max_depth or depth) + 1):
+            for seq in itertools.product(LINE_KINDS, repeat=n):
+                check_batch_case(c, questions, seq, concurrency, retries)
+                if (concurrency, retries, max_depth) == BATCH_MODES[0]:
+                    lines = [LINE_KINDS[kind][1](i) for i, kind in enumerate(seq)]
+                    check_batch_dry_run(c, questions, seq, lines, [LINE_KINDS[kind][0] for kind in seq])
+
+
+def check_batch_case(c, questions, seq, concurrency, retries):
+    c.cases += 1
+    n = len(seq)
+    lines = [LINE_KINDS[kind][1](i) for i, kind in enumerate(seq)]
+    stages = [LINE_KINDS[kind][0] for kind in seq]
+    results = [None if s == "local" else outcome(s, retries) for s in stages]
+    k = next((i for i, r in enumerate(results) if r is None or not r[0]), n)
+    attempts = {}
+    lock = threading.Lock()
+
+    def respond(index, request):
+        position = line_position(request)
+        with lock:
+            attempt = attempts.get(position, 0)
+            attempts[position] = attempt + 1
+        responder = LINE_KINDS[seq[position]][2]
+        answer = responder(attempt, request) if responder else None
+        return answer if answer is not None else json.dumps(ok_response(position)).encode()
+
+    run = drive(c.jev, ["batch", "--questions", questions, "--retries", str(retries),
+                        "--concurrency", str(concurrency)], "\n".join(lines) + "\n", respond=respond)
+    case = f"batch c={concurrency} r={retries} " + ",".join(seq)
+    if not c.clean_exit("batch-clean-exit", case, run):
+        return
+    expected = [{"id": json.loads(lines[i])["id"], **ok_response(i)} for i in range(k)]
+    got = [json.loads(x) for x in run.stdout.splitlines()]
+    if not (len(got) == len(expected) and all(map(same, got, expected))):
+        c.fail("batch-prefix", case, f"stdout {run.stdout!r} != prefix of {k} merged responses")
+    # Lines before k and line k itself are fully decided. Later lines may run only inside the window
+    # (fewer than `concurrency` lines past k) and never past a local-invalid line.
+    first_local = next((i for i, s in enumerate(stages) if s == "local"), n)
+    for position in range(n):
+        sent = attempts.get(position, 0)
+        if position <= k:
+            want = results[position][1] if results[position] else 0
+            if sent != want:
+                c.fail("batch-attempts", case, f"line {position + 1} sent {sent} times, expected {want}")
+        elif sent and (position >= k + concurrency or position > first_local or sent > results[position][1]):
+            c.fail("batch-no-send-past-window", case, f"line {position + 1} sent {sent} times after line {k + 1} failed")
+    first_seen = {}
+    for req in run.requests:
+        first_seen.setdefault(line_position(req["request"]), req["lines_flushed"])
+    for position, flushed in first_seen.items():
+        if not position - concurrency + 1 <= flushed <= position:
+            c.fail("batch-window", case,
+                   f"line {position + 1} first sent with {flushed} lines flushed, concurrency {concurrency}")
+    if run.peak > concurrency:
+        c.fail("batch-in-flight-bound", case, f"{run.peak} requests in flight, bound {concurrency}")
+    if k == n:
+        if (run.code, run.stderr) != (0, ""):
+            c.fail("batch-exit", case, f"exit {run.code} stderr {run.stderr!r}, expected 0 and silence")
+    else:
+        prefix = f"jev: batch stopped at line {k + 1}; "
+        if run.code != 1 or not run.stderr.startswith(prefix) or run.stderr.count("\n") != 1:
+            c.fail("batch-exit", case, f"exit {run.code} stderr {run.stderr!r}, expected 1 and {prefix!r}")
+        if stages[k] in ("transient", "flaky") and f"gave up after {results[k][1]} attempt" not in run.stderr:
+            c.fail("batch-exit", case, f"stderr {run.stderr!r} lacks the attempt count {results[k][1]}")
+        if stages[k] != "local" and "invalid JSON record" in run.stderr:
+            c.fail("batch-blames-right-party", case, f"API failure reported as {run.stderr.strip()!r}")
+    if SECRET_BODY in run.stderr + run.stdout:
+        c.fail("batch-no-body-leak", case, "HTTP or response body echoed")
+
+
+# P1b. Real overlap: responses with distinct delays, every completion order of four lines, every bound.
+
+def check_schedules(c):
+    questions = c.questions_file({"q": {"type": "noul", "instructions": "billing?"}})
+    n = 4
+    lines = "".join(json.dumps({"id": i, "state": f"p{i}"}) + "\n" for i in range(n))
+    for concurrency in range(1, n + 1):
+        for ranks in itertools.permutations(range(n)):
             c.cases += 1
-            lines = [LINE_KINDS[kind][1](i) for i, kind in enumerate(seq)]
-            stages = [LINE_KINDS[kind][0] for kind in seq]
-            k = next((i for i, s in enumerate(stages) if s != "ok"), n)
 
-            def respond(index, request, seq=seq):
-                kind = seq[index] if index < n else "ok"
-                responder = LINE_KINDS[kind][2]
-                return responder(index, request) if responder else json.dumps(ok_response(index)).encode()
+            def respond(index, request, ranks=ranks):
+                position = line_position(request)
+                time.sleep(0.004 * (ranks[position] + 1))
+                return json.dumps(ok_response(position)).encode()
 
-            run = drive(c.jev, ["batch", "--questions", questions], "\n".join(lines) + "\n", respond=respond)
-            case = "batch " + ",".join(seq)
+            run = drive(c.jev, ["batch", "--questions", questions, "--concurrency", str(concurrency)], lines,
+                        respond=respond)
+            case = f"schedule c={concurrency} completion ranks={ranks}"
             if not c.clean_exit("batch-clean-exit", case, run):
                 continue
-            expected = [{"id": json.loads(lines[i])["id"], **ok_response(i)} for i in range(k)]
             got = [json.loads(x) for x in run.stdout.splitlines()]
-            if not (len(got) == len(expected) and all(map(same, got, expected))):
-                c.fail("batch-prefix", case, f"stdout {run.stdout!r} != prefix of {k} merged responses")
-            sent = k + (1 if k < n and stages[k] == "net" else 0)
-            if len(run.requests) != sent:
-                c.fail("batch-one-post-per-line", case, f"{len(run.requests)} POSTs, expected {sent}")
-            for i, req in enumerate(run.requests):
-                if req["lines_flushed"] != i:
-                    c.fail("batch-flush-before-next", case, f"request {i} saw {req['lines_flushed']} flushed lines")
-            if k == n:
-                if (run.code, run.stderr) != (0, ""):
-                    c.fail("batch-exit", case, f"exit {run.code} stderr {run.stderr!r}, expected 0 and silence")
-            else:
-                prefix = f"jev: batch stopped at line {k + 1}; "
-                if run.code != 1 or not run.stderr.startswith(prefix) or run.stderr.count("\n") != 1:
-                    c.fail("batch-exit", case, f"exit {run.code} stderr {run.stderr!r}, expected 1 and {prefix!r}")
-                if stages[k] == "net" and "invalid JSON record" in run.stderr:
-                    c.fail("batch-blames-right-party", case, f"API failure reported as {run.stderr.strip()!r}")
-            if SECRET_BODY in run.stderr + run.stdout:
-                c.fail("batch-no-body-leak", case, "HTTP or response body echoed")
-            check_batch_dry_run(c, questions, seq, lines, stages)
+            if (run.code, run.stderr) != (0, "") or not all(map(same, got, [{"id": i, **ok_response(i)} for i in range(n)])) \
+                    or len(got) != n:
+                c.fail("batch-order-under-concurrency", case, f"exit {run.code} stdout {run.stdout!r}")
+            if run.peak > concurrency:
+                c.fail("batch-in-flight-bound", case, f"{run.peak} requests in flight, bound {concurrency}")
 
 
 def check_batch_dry_run(c, questions, seq, lines, stages):
@@ -241,6 +362,56 @@ def check_batch_dry_run(c, questions, seq, lines, stages):
         c.fail("dry-run-batch-report", case, f"exit {run.code} stderr {run.stderr!r} stdout {run.stdout[:120]!r}")
     elif report["total_input_tokens_estimate"] != sum(row["input_tokens_estimate"] for row in rows):
         c.fail("dry-run-total-is-sum", case, f"total {report['total_input_tokens_estimate']}")
+
+
+# P1c. Retry policy for one request: which failures retry, how many times, how long each wait is.
+
+STATUSES = [400, 401, 403, 404, 408, 409, 422, 428, 429, 499, 500, 502, 503, 504, 529, 599]
+ERROR_BODIES = [SECRET_BODY.encode(), (SECRET_BODY + ' {"error":{"message":"Endpoint is unavailable"}}').encode(),
+                (SECRET_BODY + " endpoint is unavailable").encode()]
+RETRY_AFTER = {None: None, "0": 0, "2": 2, "120": 30, "Wed, 21 Oct 2015 07:28:00 GMT": 0, "soon": None, "-1": None,
+               "1.5": None}
+NETWORK_ERRORS = [urllib.error.URLError("refused"), TimeoutError(), ConnectionResetError()]
+
+
+def check_retry_policy(c):
+    questions = c.questions_file({"q": NOUL})
+    failures = [("http", status, error_body, ra) for status in STATUSES for error_body in ERROR_BODIES
+                for ra in RETRY_AFTER] + [("net", exc, None, None) for exc in NETWORK_ERRORS]
+    for (kind, what, error_body, ra), retries in itertools.product(failures, (0, 1, 3)):
+        c.cases += 1
+        if kind == "http":
+            status = what
+            transient = status == 429 or 500 <= status <= 599 or (
+                b"Endpoint is unavailable" in error_body and status not in (401, 403, 422))
+            reason = f"System One HTTP {status}"
+
+            def respond(index, request, status=status, error_body=error_body, ra=ra):
+                headers = http.client.HTTPMessage()
+                if ra is not None:
+                    headers["Retry-After"] = ra
+                raise urllib.error.HTTPError(request.full_url, status, SECRET_BODY, headers, io.BytesIO(error_body))
+        else:
+            transient, reason, respond = True, "System One connection failed or timed out", raiser(what)
+        waits = []
+        run = drive(c.jev, ["classify", "--questions", questions, "--retries", str(retries)], '{"id":1,"state":"x"}',
+                    respond=respond, waits=waits, jitter=lambda low, high: high)
+        case = f"retry {kind} {what!r} body={error_body[-30:] if error_body else None!r} retry-after={ra!r} r={retries}"
+        if not c.clean_exit("retry-clean-exit", case, run):
+            continue
+        attempts = retries + 1 if transient else 1
+        if len(run.requests) != attempts:
+            c.fail("retry-attempts", case, f"{len(run.requests)} requests, expected {attempts}")
+        message = (f"jev: {reason}; gave up after {attempts} attempt{'s' if attempts > 1 else ''}\n" if transient
+                   else f"jev: {reason}; not retryable\n")
+        if (run.code, run.stdout, run.stderr) != (1, "", message):
+            c.fail("retry-exit", case, f"exit {run.code} stderr {run.stderr!r}, expected {message!r}")
+        honored = RETRY_AFTER.get(ra)
+        schedule = [honored if honored is not None else min(30, 0.5 * 2 ** n) for n in range(attempts - 1)]
+        if waits != schedule:
+            c.fail("retry-backoff-schedule", case, f"waits {waits}, expected {schedule}")
+        if SECRET_BODY in run.stderr + run.stdout:
+            c.fail("retry-no-body-leak", case, "HTTP body or reason echoed")
 
 
 # P2. Request shape and credential isolation for every backend, question set, and record in scope.
@@ -639,7 +810,9 @@ def check_summarize(c, depth):
     results.write_text(summary_line("a:1", 0) + "\n", encoding="utf-8")
     for flag, expected in ((["--cache", str(c.tmp / "summarize-cache")], "jev: summarize sends no requests; --cache is for classify and batch\n"),
                            (["--dry-run"], "jev: summarize sends no requests; --dry-run is for classify and batch\n"),
-                           (["--labels", str(results)], "jev: --labels is for eval; --question is for eval and summarize\n")):
+                           (["--labels", str(results)], "jev: --labels is for eval; --question is for eval and summarize\n"),
+                           (["--retries", "1"], "jev: summarize sends no requests; --retries and --concurrency are for classify and batch\n"),
+                           (["--concurrency", "2"], "jev: summarize sends no requests; --retries and --concurrency are for classify and batch\n")):
         c.cases += 1
         run = drive(c.jev, ["summarize", "--input", str(results), *flag], "", {"TYPESAFE_API_KEY": KEY})
         case = f"summarize {flag[0]}"
@@ -944,19 +1117,26 @@ def check_cache(c, depth):
                        f"second run sent {len(runs[1].requests)}, stdout {runs[1].stdout[:120]!r}")
 
     questions = c.questions_file({"q": NOUL})
+    # Every network-stage kind at the default --retries 3: failures that exhaust or never retry store nothing,
+    # and a line that fails once then succeeds is stored like any success.
     for kind, (stage, line, responder) in LINE_KINDS.items():
-        if stage != "net":
+        if stage in ("ok", "local"):
             continue
         c.cases += 1
         cache = c.tmp / "cache-failure"
         shutil.rmtree(cache, ignore_errors=True)
         argv = ["classify", "--questions", questions, "--cache", str(cache)]
-        failed = drive(c.jev, argv, line(0), respond=responder)
+        failed = drive(c.jev, argv, line(0), respond=lambda i, r, responder=responder:
+                       responder(i, r) or json.dumps(ok_response(0)).encode())
         left = cache_entries(cache)
-        retry = drive(c.jev, argv, line(0), respond=responses)
-        if failed.code != 1 or left or len(retry.requests) != 1:
+        again = drive(c.jev, argv, line(0), respond=responses)
+        if stage == "flaky":
+            if failed.code != 0 or len(left) != 1 or len(again.requests) != 0:
+                c.fail("cache-stores-after-retry", f"cache failure={kind}",
+                       f"exit {failed.code}, {len(left)} entries, rerun sent {len(again.requests)}")
+        elif failed.code != 1 or left or len(again.requests) != 1:
             c.fail("cache-never-stores-failure", f"cache failure={kind}",
-                   f"exit {failed.code}, {len(left)} entries left, retry sent {len(retry.requests)}")
+                   f"exit {failed.code}, {len(left)} entries left, retry sent {len(again.requests)}")
 
     for name, corrupt in CORRUPTIONS.items():
         c.cases += 1
@@ -965,7 +1145,11 @@ def check_cache(c, depth):
         argv = ["classify", "--questions", questions, "--cache", str(cache)]
         record = '{"id":"c","state":"x"}'
         drive(c.jev, argv, record, respond=responses)
-        [entry] = cache_entries(cache)
+        entries = cache_entries(cache)
+        if len(entries) != 1:
+            c.fail("cache-stores-success", f"cache corrupt={name}", f"{len(entries)} entries after one successful request")
+            continue
+        [entry] = entries
         good = entry.read_bytes()
         stored = json.loads(good)
         damage = good[:len(good) // 2] if corrupt is None else corrupt if isinstance(corrupt, bytes) else corrupt(stored)
@@ -981,44 +1165,62 @@ def check_cache(c, depth):
         if len(reuse.requests) != 0 or not same(json.loads(reuse.stdout or "null"), fresh):
             c.fail("cache-corrupt-rewritten", case, f"third run sent {len(reuse.requests)}, stdout {reuse.stdout[:120]!r}")
 
+    # Identical bodies within one batch. Sequentially the second line hits the first line's entry; above
+    # concurrency 1 both can be in flight before either stores, which the README documents.
+    for concurrency in (1, 2, 3):
+        c.cases += 1
+        cache = c.tmp / "cache-duplicates"
+        shutil.rmtree(cache, ignore_errors=True)
+        lines = '{"id":1,"state":"dup"}\n{"id":2,"state":"dup"}\n{"id":3,"state":"other"}\n'
+        run = drive(c.jev, ["batch", "--questions", questions, "--cache", str(cache), "--concurrency", str(concurrency)],
+                    lines, respond=lambda i, r: json.dumps(ok_response(0)).encode())
+        case = f"cache duplicates c={concurrency}"
+        if not c.clean_exit("cache-clean-exit", case, run):
+            continue
+        dup_sent = sum(json.loads(req["request"].data)["state"] == "dup" for req in run.requests)
+        got = [json.loads(x) for x in run.stdout.splitlines()]
+        expected = [{"id": i, **ok_response(0)} for i in (1, 2, 3)]
+        bound = 1 if concurrency == 1 else 2
+        if run.code != 0 or not 1 <= dup_sent <= bound or len(cache_entries(cache)) != 2 \
+                or len(got) != 3 or not all(map(same, got, expected)):
+            c.fail("cache-duplicate-within-run", case,
+                   f"exit {run.code}, duplicate sent {dup_sent} times (max {bound}), {len(cache_entries(cache))} entries")
+
+    # Resume: an interrupted batch (default --retries 3) then a rerun where every request succeeds. Lines are
+    # keyed by position, as in check_batch, so retried requests count against their own line.
     for n in range(1, depth + 1):
         for seq in itertools.product(LINE_KINDS, repeat=n):
             c.cases += 1
             cache = c.tmp / "cache-resume"
             shutil.rmtree(cache, ignore_errors=True)
             lines = [LINE_KINDS[kind][1](i) for i, kind in enumerate(seq)]
-            stored = {}
+            stages = [LINE_KINDS[kind][0] for kind in seq]
+            results = [None if s == "local" else outcome(s, 3) for s in stages]
+            k = next((i for i, r in enumerate(results) if r is None or not r[0]), n)
+            first_local = next((i for i, s in enumerate(stages) if s == "local"), n)
             case = "cache resume " + ",".join(seq)
-            for attempt in ("interrupted", "resumed"):
-                sent = []
+            plans = {"interrupted": ({p: results[p][1] for p in range(min(k + 1, n)) if results[p]}, k),
+                     "resumed": ({p: 1 for p in range(k, first_local)}, first_local)}
+            for attempt, (want, emitted) in plans.items():
+                attempts = {}
 
-                def respond(index, request):
-                    sent.append(index)
-                    kind = pending[index] if attempt == "interrupted" else "ok"
-                    responder = LINE_KINDS[kind][2]
-                    return responder(index, request) if responder else json.dumps(ok_response(index)).encode()
+                def respond(index, request, attempt=attempt, attempts=attempts):
+                    position = line_position(request)
+                    tries = attempts.get(position, 0)
+                    attempts[position] = tries + 1
+                    responder = LINE_KINDS[seq[position]][2] if attempt == "interrupted" else None
+                    answer = responder(tries, request) if responder else None
+                    return answer if answer is not None else json.dumps(ok_response(position)).encode()
 
-                expected_out, pending = [], []
-                for i, kind in enumerate(seq):
-                    if LINE_KINDS[kind][0] == "local":
-                        break
-                    identity = request_identity("https://opencode.ai/zen/v1", "jev-1.13-free", {"q": NOUL}, lines[i])
-                    if identity in stored:
-                        expected_out.append({"id": json.loads(lines[i])["id"], **stored[identity]})
-                        continue
-                    pending.append(kind)
-                    if attempt == "interrupted" and LINE_KINDS[kind][0] == "net":
-                        break
-                    stored[identity] = ok_response(len(pending) - 1)
-                    expected_out.append({"id": json.loads(lines[i])["id"], **stored[identity]})
                 run = drive(c.jev, ["batch", "--questions", questions, "--cache", str(cache)],
                             "\n".join(lines) + "\n", respond=respond)
                 if not c.clean_exit("cache-clean-exit", case, run):
                     break
+                if attempts != want:
+                    c.fail("cache-resume-sends-only-missing", case, f"{attempt}: sent {attempts}, expected {want}")
+                expected = [{"id": json.loads(lines[i])["id"], **ok_response(i)} for i in range(emitted)]
                 got = [json.loads(x) for x in run.stdout.splitlines()]
-                if len(run.requests) != len(pending):
-                    c.fail("cache-resume-sends-only-missing", case, f"{attempt}: {len(run.requests)} requests, expected {len(pending)}")
-                if not (len(got) == len(expected_out) and all(map(same, got, expected_out))):
+                if not (len(got) == len(expected) and all(map(same, got, expected))):
                     c.fail("cache-resume-output", case, f"{attempt}: stdout {run.stdout[:200]!r}")
 
     for base, model, questions, raw in configs:
@@ -1148,6 +1350,8 @@ EVAL_ERRORS = [
      "jev: eval sends no requests; --cache is for classify and batch"),
     (['{"id":"x","label":"a"}'], [], ("--question", "r", "--dry-run"),
      "jev: eval sends no requests; --dry-run is for classify and batch"),
+    (['{"id":"x","label":"a"}'], [], ("--question", "r", "--retries", "0"), "jev: eval sends no requests; --retries and --concurrency are for classify and batch"),
+    (['{"id":"x","label":"a"}'], [], ("--question", "r", "--concurrency", "1"), "jev: eval sends no requests; --retries and --concurrency are for classify and batch"),
 ]
 
 
@@ -1210,8 +1414,27 @@ def check_question_file_dry_run(c, case, command, document, real):
 
 MUTANTS = [
     ("batch keeps going after a failure", "batch-prefix",
-     [("                    return 1\n                if args.dry_run:", "                    continue\n                if args.dry_run:")]),
-    ("batch output not flushed per line", "batch-flush-before-next",
+     [("                    return 1\n                emit(result)", "                    continue\n                emit(result)")]),
+    ("batch window and pool one wider than --concurrency", "batch-in-flight-bound",
+     [("len(window) < concurrency", "len(window) < concurrency + 1"),
+      ("max_workers=concurrency", "max_workers=concurrency + 1")]),
+    ("batch emits newest finished line first", "batch-order-under-concurrency",
+     [("pending = window.popleft()", "pending = window.pop()")]),
+    ("batch keeps reading past an invalid line", "batch-no-send-past-window",
+     [("                        window.append(exc)\n                        lines = None\n                        break",
+       "                        window.append(exc)\n                        continue")]),
+    ("retry limit off by one", "retry-attempts",
+     [("if attempt > retries:", "if attempt > retries + 1:")]),
+    ("auth failures retried", "retry-attempts",
+     [('raise JevError(f"System One HTTP {status}; not retryable") from None',
+       'raise Transient(f"System One HTTP {status}") from None')]),
+    ("Retry-After ignored", "retry-backoff-schedule",
+     [("    if retry_after is not None:\n        return min(", "    if False:\n        return min(")]),
+    ("backoff never grows", "retry-backoff-schedule",
+     [("BACKOFF_BASE_SECONDS * 2 ** (attempt - 1)", "BACKOFF_BASE_SECONDS")]),
+    ("unavailable phrase retries auth failures", "retry-attempts",
+     [("status not in (401, 403, 422) and ENDPOINT_UNAVAILABLE", "ENDPOINT_UNAVAILABLE")]),
+    ("batch output not flushed per line", "batch-window",
      [("allow_nan=False), flush=True)", "allow_nan=False))")]),
     ("TypeSafe origin matched by substring", "auth-only-to-typesafe",
      [('url.netloc.lower() == "api.typesafe.ai"', '"typesafe.ai" in url.netloc.lower()')]),
@@ -1247,14 +1470,15 @@ MUTANTS = [
      [("    except (OSError, ValueError, RecursionError):\n        raise JevError(\"questions file",
        "    except OSError:\n        raise JevError(\"questions file")]),
     ("record id part of cache key", "cache-hit-iff-same-request",
-     [("cache.path(backend.endpoint, body)", 'cache.path(backend.endpoint, body + repr(record["id"]).encode())')]),
+     [("cache.path(request.full_url, request.data)", "cache.path(request.full_url, request.data + repr(record_id).encode())")]),
     ("endpoint left out of cache key", "cache-hit-iff-same-request",
      [('f"jev-cache-v{CACHE_VERSION}\\n{endpoint}\\n"', 'f"jev-cache-v{CACHE_VERSION}\\n"')]),
     ("cached response returned with stored id", "cache-output-current-id",
-     [('return {"id": record["id"], **cached}', 'return {**cached, "id": "cached"}')]),
+     [("    result = cache.load(entry) if entry else None\n",
+       '    result = cache.load(entry) if entry else None\n    result = result and {**result, "id": "cached"}\n')]),
     ("failure stored and trusted", "cache-never-stores-failure",
-     [('            result = read_json(response.read().decode("utf-8"))\n',
-       '            result = read_json(response.read().decode("utf-8"))\n            cache and cache.store(entry, result)\n'),
+     [("        result = post(request, timeout, retries, stop)\n",
+       "        result = post(request, timeout, retries, stop)\n        cache and cache.store(entry, result)\n"),
       ('return entry["response"] if valid_response(entry.get("response")) else None', 'return entry.get("response")')]),
     ("corrupt entry raises", "cache-corrupt-refetch",
      [("        except (OSError, ValueError, UnicodeError, RecursionError):\n            return None",
@@ -1263,8 +1487,10 @@ MUTANTS = [
      [('entry.get("version") != CACHE_VERSION or entry.get("key") != path.stem', "False")]),
     ("cache keyed per questions file", "cache-hit-across-question-file-forms",
      [("cache = Cache(args.cache) if args.cache else None", "cache = Cache(args.cache / args.questions.name) if args.cache else None")]),
+    ("successful responses never stored", "cache-stores-after-retry",
+     [("        if cache:\n            cache.store(entry, result)\n", "")]),
     ("cache never read", "cache-resume-sends-only-missing",
-     [("cached = cache.load(entry) if entry else None", "cached = None")]),
+     [("result = cache.load(entry) if entry else None", "result = None")]),
     ("eval reads credentials", "eval-offline",
      [('        if args.command == "eval":\n            if not args.labels:',
        '        if args.command == "eval":\n            api_key()\n            if not args.labels:')]),
@@ -1293,9 +1519,9 @@ MUTANTS = [
     ("dry run reads credentials", "dry-run-no-network-no-credentials",
      [("api_key() if backend.typesafe and not args.dry_run else None", "api_key() if backend.typesafe else None")]),
     ("dry run also sends", "dry-run-no-network-no-credentials",
-     [("                return estimate(record, questions, backend)",
-       "                return [classify(record, questions, key, backend, args.timeout), "
-       "estimate(record, questions, backend)][1]")]),
+     [('                emit(dry_run_report([estimate(read_json(raw), questions, backend)], backend))',
+       "                emit(dry_run_report([[classify(read_json(raw), questions, key, backend, args.timeout), "
+       "estimate(read_json(raw), questions, backend)][1]], backend))")]),
     ("dry run skips record validation", "dry-run-validates-like-send",
      [("    payload = request_payload(record, questions, backend)\n    text = ",
        "    payload = dict(record, questions=questions)\n    text = ")]),
@@ -1310,9 +1536,9 @@ MUTANTS = [
      [('"question_tokens_estimate": estimate_tokens(questions)',
        '"question_tokens_estimate": estimate_tokens({"schema_version": 1, "questions": questions})')]),
     ("dry run writes the cache", "dry-run-ignores-cache",
-     [("                return estimate(record, questions, backend)",
-       "                cache and cache.store(cache.path(backend.endpoint, request_body(request_payload(record, questions, backend))), {\"answers\": {}})\n"
-       "                return estimate(record, questions, backend)")]),
+     [('                emit(dry_run_report([estimate(read_json(raw), questions, backend)], backend))',
+       "                cache and cache.store(cache.path(backend.endpoint, request_body(request_payload(read_json(raw), questions, backend))), {\"answers\": {}})\n"
+       + '                emit(dry_run_report([estimate(read_json(raw), questions, backend)], backend))')]),
     ("eval accepts --dry-run and ignores it", "eval-errors",
      [('        if offline and args.dry_run:\n', '        if False:\n')]),
     ("dry run total drops a batch row", "dry-run-total-is-sum",
@@ -1332,6 +1558,8 @@ MUTANTS = [
        "        questions = read_json(args.questions.read_text(encoding=\"utf-8\"))\n        if question is None")]),
     ("summarize treated as a sending command", "summarize-flag-errors",
      [('offline = args.command in ("eval", "summarize")', 'offline = args.command == "eval"')]),
+    ("offline commands accept --retries and --concurrency", "summarize-flag-errors",
+     [("if offline and (args.retries is not None or args.concurrency is not None):", "if False:")]),
     ("summarize reads credentials", "summarize-offline",
      [("            return run_summarize(args)", "            api_key()\n            return run_summarize(args)")]),
 ]
@@ -1386,7 +1614,8 @@ KNOWN_FINDINGS = {
 def run_all(jev, demo, depth, only=None):
     with tempfile.TemporaryDirectory() as tmp:
         c = Checker(jev, tmp, demo)
-        for name, fn in (("batch", lambda: check_batch(c, depth)), ("requests", lambda: check_requests(c)),
+        for name, fn in (("batch", lambda: check_batch(c, depth)), ("schedules", lambda: check_schedules(c)),
+                         ("retry", lambda: check_retry_policy(c)), ("requests", lambda: check_requests(c)),
                          ("numbers", lambda: check_numbers(c)), ("questions", lambda: check_question_files(c)),
                          ("redaction", lambda: (check_redaction(c), check_redact_before_cap(c), check_demo_send(c))),
                          ("cache", lambda: check_cache(c, min(depth, 2))),
@@ -1398,12 +1627,13 @@ def run_all(jev, demo, depth, only=None):
 
 
 SECTIONS = {"batch": "batch", "numbers": "numbers", "questions": "questions", "cache": "cache", "eval": "eval",
-            "summarize": "summarize", "redact": "redaction", "demo": "redaction"}
+            "summarize": "summarize", "redact": "redaction", "demo": "redaction", "retry": "retry"}
 
 
 # Properties checked outside the section their prefix names; a mutant must run where its property is checked.
 PROPERTY_SECTIONS = {"dry-run-questions-like-send": "questions", "dry-run-ignores-cache": "cache",
-                     "dry-run-total-is-sum": "batch", "dry-run-batch-exit": "batch", "dry-run-batch-report": "batch"}
+                     "dry-run-total-is-sum": "batch", "dry-run-batch-exit": "batch", "dry-run-batch-report": "batch",
+                     "batch-order-under-concurrency": "schedules", "batch-in-flight-bound": "schedules"}
 
 
 def section_of(prop):
@@ -1443,7 +1673,7 @@ def stale():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--depth", type=int, default=3, help="max batch length to enumerate (default 3)")
-    parser.add_argument("--only", choices=["batch", "requests", "numbers", "questions", "redaction", "cache", "eval", "summarize"])
+    parser.add_argument("--only", choices=["batch", "schedules", "retry", "requests", "numbers", "questions", "redaction", "cache", "eval", "summarize"])
     parser.add_argument("--mutants", action="store_true", help="also prove each property fails on a broken jev.py")
     parser.add_argument("--stale", action="store_true", help="only report covered files whose content differs from SYNC_BLOBS")
     args = parser.parse_args()

@@ -7,7 +7,7 @@
 - `cache-rerun` a second batch with the same states and new IDs sends zero requests and prints complete answers with the new IDs.
 - `cache-miss` a different model, backend, question mapping, or assets sends a request.
 - `cache-question-forms` a version-1 question file hits the entry its equivalent legacy mapping stored, because only the unwrapped mapping is sent.
-- `cache-resume` after a batch stops at line N, a rerun of the full input sends only lines N onward.
+- `cache-resume` after a batch stops at line N because line N exhausted `--retries`, a rerun of the full input sends only lines N onward. A failure is never stored, however many attempts it took.
 - `cache-no-failure` an invalid or failed response writes no entry, so the retry sends again.
 - `cache-corrupt` a corrupt entry is refetched and rewritten, and the next run hits it.
 - `cache-dry-run` `--dry-run` with a warm cache still prices every record and sends nothing, the warm cache keeps serving afterward, and a dry run on a cold cache leaves no entry, so the next real run misses.

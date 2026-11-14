@@ -3,17 +3,24 @@
 
 import argparse
 from bisect import bisect_right
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 import contextlib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import random
+import re
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
@@ -25,6 +32,13 @@ CALIBRATION_EDGES = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 PRICING_DATE = "2026-11-14"
 ZEN_PRICES = "https://opencode.ai/docs/zen"
 TYPESAFE_PRICES = "https://docs.typesafe.ai/models"
+MAX_CONCURRENCY = 32
+MAX_RETRIES = 10
+DEFAULT_RETRIES = 3
+BACKOFF_BASE_SECONDS = 0.5
+BACKOFF_CAP_SECONDS = 30.0
+ERROR_BODY_LIMIT = 4096
+ENDPOINT_UNAVAILABLE = b"Endpoint is unavailable"
 # (hostname, model) -> (input USD per million tokens, source). Both sources list output tokens as free.
 PRICES = {
     ("opencode.ai", "jev-1.13-free"): ("0", ZEN_PRICES),
@@ -71,6 +85,13 @@ class Backend:
 
 class JevError(Exception):
     pass
+
+
+class Transient(Exception):
+    def __init__(self, reason, retry_after=None):
+        super().__init__(reason)
+        self.reason = reason
+        self.retry_after = retry_after
 
 
 CACHE_VERSION = 1
@@ -231,38 +252,139 @@ def dry_run_report(rows, backend):
     }
 
 
-def classify(record, questions, key, backend, timeout, cache=None):
+def prepare(record, questions, key, backend):
     payload = request_payload(record, questions, backend)
     headers = {"Content-Type": "application/json", "User-Agent": "jev-cli/0.1"}
     if key:
         headers["Authorization"] = "Bearer " + key
     if uses_images(payload):
         headers["TypeSafe-Danger-Zone-Images"] = "true"
-    body = request_body(payload)
-    entry = cache.path(backend.endpoint, body) if cache else None
-    cached = cache.load(entry) if entry else None
-    if cached is not None:
-        return {"id": record["id"], **cached}
-    request = urllib.request.Request(
-        backend.endpoint, data=body,
-        headers=headers,
-        method="POST",
-    )
+    return urllib.request.Request(backend.endpoint, data=request_body(payload), headers=headers, method="POST")
+
+
+def retry_after_seconds(value):
+    if not value:
+        return None
+    value = value.strip()
+    if re.fullmatch(r"[0-9]{1,9}", value):
+        return float(value)
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+
+
+def send(request, timeout):
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            result = read_json(response.read().decode("utf-8"))
+            return read_json(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        exc.close()
-        raise JevError(f"System One HTTP {exc.code}; no retry performed") from None
+        try:
+            status = exc.code
+            retry_after = retry_after_seconds((exc.headers or {}).get("Retry-After"))
+            # Only the exact upstream phrase counts; the body itself is never surfaced.
+            unavailable = status not in (401, 403, 422) and ENDPOINT_UNAVAILABLE in (exc.read(ERROR_BODY_LIMIT) or b"")
+        except (OSError, ValueError):
+            unavailable = False
+        finally:
+            exc.close()
+        if status == 429 or 500 <= status <= 599 or unavailable:
+            raise Transient(f"System One HTTP {status}", retry_after) from None
+        raise JevError(f"System One HTTP {status}; not retryable") from None
     except (urllib.error.URLError, TimeoutError, OSError):
-        raise JevError("System One connection failed or timed out; no retry performed") from None
-    if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
-        raise JevError("System One returned an invalid response object")
-    if "id" in result:
-        raise JevError("System One response id collides with record id")
-    if cache:
-        cache.store(entry, result)
-    return {"id": record["id"], **result}
+        raise Transient("System One connection failed or timed out") from None
+
+
+def backoff_seconds(attempt, retry_after):
+    if retry_after is not None:
+        return min(BACKOFF_CAP_SECONDS, retry_after)
+    return random.uniform(0, min(BACKOFF_CAP_SECONDS, BACKOFF_BASE_SECONDS * 2 ** (attempt - 1)))
+
+
+def post(request, timeout, retries, stop):
+    attempt = 1
+    while True:
+        try:
+            return send(request, timeout)
+        except Transient as exc:
+            if attempt > retries:
+                plural = "s" if attempt > 1 else ""
+                raise JevError(f"{exc.reason}; gave up after {attempt} attempt{plural}") from None
+            if stop.wait(backoff_seconds(attempt, exc.retry_after)):
+                raise JevError(f"{exc.reason}; retry cancelled") from None
+            attempt += 1
+
+
+def respond(record_id, request, timeout, retries, stop, cache=None):
+    # Only validated responses are stored, after retries; a hit sends nothing and never retries.
+    entry = cache.path(request.full_url, request.data) if cache else None
+    result = cache.load(entry) if entry else None
+    if result is None:
+        result = post(request, timeout, retries, stop)
+        if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
+            raise JevError("System One returned an invalid response object")
+        if "id" in result:
+            raise JevError("System One response id collides with record id")
+        if cache:
+            cache.store(entry, result)
+    return {"id": record_id, **result}
+
+
+def classify(record, questions, key, backend, timeout, retries=0, stop=None, cache=None):
+    request = prepare(record, questions, key, backend)
+    return respond(record["id"], request, timeout, retries, stop or threading.Event(), cache)
+
+
+def emit(result):
+    print(json.dumps(result, ensure_ascii=False, allow_nan=False), flush=True)
+
+
+def batch(questions, key, backend, timeout, retries, concurrency, cache=None):
+    """Keep at most `concurrency` lines in flight and emit results strictly in input order."""
+    stop = threading.Event()
+    window = deque()
+    lines = iter(sys.stdin)
+    emitted = 0
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        try:
+            while True:
+                while lines is not None and len(window) < concurrency:
+                    try:
+                        line = next(lines, None)
+                        if line is None:
+                            lines = None
+                            break
+                        record = read_json(line)
+                        request = prepare(record, questions, key, backend)
+                    except (JevError, ValueError, UnicodeError, RecursionError) as exc:
+                        window.append(exc)
+                        lines = None
+                        break
+                    window.append(pool.submit(respond, record["id"], request, timeout, retries, stop, cache))
+                if not window:
+                    return 0
+                pending = window.popleft()
+                try:
+                    if not isinstance(pending, Future):
+                        raise pending
+                    result = pending.result()
+                except (JevError, ValueError, UnicodeError, RecursionError) as exc:
+                    detail = str(exc) if isinstance(exc, JevError) else "invalid JSON record"
+                    print(f"jev: batch stopped at line {emitted + 1}; {detail}", file=sys.stderr)
+                    return 1
+                emit(result)
+                emitted += 1
+        except KeyboardInterrupt:
+            print(f"jev: batch stopped at line {emitted + 1}; interrupted", file=sys.stderr)
+            return 130
+        finally:
+            stop.set()
+            for pending in window:
+                if isinstance(pending, Future):
+                    pending.cancel()
 
 
 def id_key(value):
@@ -414,6 +536,11 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true",
                         help="validate, then print estimated input tokens and cost as one JSON object; "
                              "sends nothing and reads no credentials")
+    parser.add_argument("--retries", type=int,
+                        help=f"classify/batch: retries per request after HTTP 429 or 5xx, a connection error or timeout, or an "
+                             f"'Endpoint is unavailable' error body on a status other than 401/403/422 (default {DEFAULT_RETRIES}, max {MAX_RETRIES})")
+    parser.add_argument("--concurrency", type=int,
+                        help=f"batch: requests in flight (default 1, max {MAX_CONCURRENCY})")
     args = parser.parse_args(argv)
     if args.command != "summarize" and args.questions is None:
         parser.error("--questions is required for classify, batch, and eval")
@@ -421,6 +548,10 @@ def main(argv=None):
     try:
         if not math.isfinite(args.timeout) or args.timeout <= 0:
             raise JevError("timeout must be positive and finite")
+        if args.retries is not None and not 0 <= args.retries <= MAX_RETRIES:
+            raise JevError(f"retries must be between 0 and {MAX_RETRIES}")
+        if args.concurrency is not None and not 1 <= args.concurrency <= MAX_CONCURRENCY:
+            raise JevError(f"concurrency must be between 1 and {MAX_CONCURRENCY}")
         if args.command not in ("classify", "summarize") and args.input:
             raise JevError(f"{args.command} reads JSONL from stdin; --input is for classify and summarize")
         if (args.labels and args.command != "eval") or (args.question is not None and not offline):
@@ -429,6 +560,8 @@ def main(argv=None):
             raise JevError(f"{args.command} sends no requests; --cache is for classify and batch")
         if offline and args.dry_run:
             raise JevError(f"{args.command} sends no requests; --dry-run is for classify and batch")
+        if offline and (args.retries is not None or args.concurrency is not None):
+            raise JevError(f"{args.command} sends no requests; --retries and --concurrency are for classify and batch")
         if args.command == "summarize":
             return run_summarize(args)
         questions = load_questions(args.questions)
@@ -449,31 +582,26 @@ def main(argv=None):
         key = api_key() if backend.typesafe and not args.dry_run else None
         cache = Cache(args.cache) if args.cache else None
 
-        def run(record):
-            if args.dry_run:
-                return estimate(record, questions, backend)
-            return classify(record, questions, key, backend, args.timeout, cache)
-
-        if args.command == "classify":
-            raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
-            result = run(read_json(raw))
-            print(json.dumps(dry_run_report([result], backend) if args.dry_run else result,
-                             ensure_ascii=False, allow_nan=False))
-        else:
+        if args.dry_run:
+            if args.command == "classify":
+                raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
+                emit(dry_run_report([estimate(read_json(raw), questions, backend)], backend))
+                return 0
             rows = []
             for number, line in enumerate(sys.stdin, 1):
                 try:
-                    result = run(read_json(line))
+                    rows.append({"line": number, **estimate(read_json(line), questions, backend)})
                 except (JevError, ValueError, UnicodeError, RecursionError) as exc:
                     detail = str(exc) if isinstance(exc, JevError) else "invalid JSON record"
                     print(f"jev: batch stopped at line {number}; {detail}", file=sys.stderr)
                     return 1
-                if args.dry_run:
-                    rows.append({"line": number, **result})
-                else:
-                    print(json.dumps(result, ensure_ascii=False, allow_nan=False), flush=True)
-            if args.dry_run:
-                print(json.dumps(dry_run_report(rows, backend), ensure_ascii=False, allow_nan=False))
+            emit(dry_run_report(rows, backend))
+            return 0
+        retries = DEFAULT_RETRIES if args.retries is None else args.retries
+        if args.command == "batch":
+            return batch(questions, key, backend, args.timeout, retries, args.concurrency or 1, cache)
+        raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
+        emit(classify(read_json(raw), questions, key, backend, args.timeout, retries, cache=cache))
     except JevError as exc:
         print("jev: " + str(exc), file=sys.stderr)
         return 1
