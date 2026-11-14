@@ -5,6 +5,7 @@ import argparse
 from collections import Counter
 import contextlib
 from dataclasses import dataclass, field
+from decimal import Decimal
 import http.client
 import io
 import itertools
@@ -215,6 +216,31 @@ def check_batch(c, depth):
                     c.fail("batch-blames-right-party", case, f"API failure reported as {run.stderr.strip()!r}")
             if SECRET_BODY in run.stderr + run.stdout:
                 c.fail("batch-no-body-leak", case, "HTTP or response body echoed")
+            check_batch_dry_run(c, questions, seq, lines, stages)
+
+
+def check_batch_dry_run(c, questions, seq, lines, stages):
+    run = drive(c.jev, ["batch", "--dry-run", "--questions", questions], "\n".join(lines) + "\n",
+                respond=lambda index, request: json.dumps(ok_response(index)).encode())
+    c.cases += 1
+    case = "batch --dry-run " + ",".join(seq)
+    if not c.clean_exit("dry-run-clean-exit", case, run):
+        return
+    if run.requests or run.key_reads:
+        c.fail("dry-run-no-network-no-credentials", case, f"{len(run.requests)} requests, {run.key_reads} key reads")
+    k = next((i for i, s in enumerate(stages) if s == "local"), len(seq))
+    if k < len(seq):
+        prefix = f"jev: batch stopped at line {k + 1}; "
+        if run.code != 1 or run.stdout or not run.stderr.startswith(prefix) or run.stderr.count("\n") != 1:
+            c.fail("dry-run-batch-exit", case, f"exit {run.code} stdout {run.stdout[:80]!r} stderr {run.stderr!r}")
+        return
+    report = json.loads(run.stdout) if run.code == 0 and run.stdout.count("\n") == 1 else {}
+    rows = report.get("records", [])
+    if run.stderr or not (len(rows) == len(lines) and all(
+            row["line"] == i + 1 and same(row["id"], json.loads(line)["id"]) for i, (row, line) in enumerate(zip(rows, lines)))):
+        c.fail("dry-run-batch-report", case, f"exit {run.code} stderr {run.stderr!r} stdout {run.stdout[:120]!r}")
+    elif report["total_input_tokens_estimate"] != sum(row["input_tokens_estimate"] for row in rows):
+        c.fail("dry-run-total-is-sum", case, f"total {report['total_input_tokens_estimate']}")
 
 
 # P2. Request shape and credential isolation for every backend, question set, and record in scope.
@@ -274,6 +300,7 @@ def check_requests(c):
         response = {"answers": {}, "model": model}
         run = drive(c.jev, ["classify", "--questions", c.questions_file(questions), "--base-url", base,
                             "--model", model, "--timeout", "7"], raw, env, lambda i, r: json.dumps(response).encode())
+        check_request_dry_run(c, case, base, model, questions, raw, env, run)
         if not c.clean_exit("request-clean-exit", case, run):
             continue
         record = json.loads(raw)
@@ -321,6 +348,56 @@ def check_requests(c):
         for prop, ok in checks.items():
             if not ok:
                 c.fail(prop, case, f"headers {dict(r.header_items())} stdout {run.stdout[:120]!r}")
+
+
+# P2b. Dry run: same local verdict as a real send, no credentials or network, README estimator and price table.
+
+# README "Dry run" prices, restated independently of jev.PRICES for the models in MODELS.
+DRY_RUN_PRICES = {("opencode.ai", "jev-1.13-free"): "0", (TYPESAFE_HOST, "jev-1.14.0"): "0.042"}
+
+
+def readme_estimate(value):
+    text = json.dumps(value, ensure_ascii=False)
+    ascii_chars = sum(1 for ch in text if ord(ch) < 128)
+    return -(-ascii_chars // 4) + len(text) - ascii_chars
+
+
+def check_request_dry_run(c, case, base, model, questions, raw, env, real):
+    run = drive(c.jev, ["classify", "--dry-run", "--questions", c.questions_file(questions), "--base-url", base,
+                        "--model", model], raw, env, lambda i, r: b'{"answers":{}}')
+    c.cases += 1
+    case = case.replace("request ", "request --dry-run ", 1)
+    if not c.clean_exit("dry-run-clean-exit", case, run):
+        return
+    if run.requests or run.key_reads:
+        c.fail("dry-run-no-network-no-credentials", case, f"{len(run.requests)} requests, {run.key_reads} key reads")
+    # A send's missing-key failure is a credential step, which dry run skips by contract.
+    missing_key = real.stderr.startswith("jev: missing TYPESAFE_API_KEY")
+    if not real.crash and not missing_key and (run.code, run.stderr) != (real.code, real.stderr):
+        c.fail("dry-run-validates-like-send", case, f"dry exit {run.code} {run.stderr!r}, send exit {real.code} {real.stderr!r}")
+    if run.code != 0:
+        if run.stdout:
+            c.fail("dry-run-validates-like-send", case, f"stdout on rejection {run.stdout[:80]!r}")
+        return
+    record = json.loads(raw)
+    report = json.loads(run.stdout)
+    row, = report["records"]
+    text_body = {"model": model, "state": record["state"], "questions": questions}
+    tokens = readme_estimate(text_body)
+    if not same(row["id"], record["id"]) or row["input_tokens_estimate"] != tokens \
+            or report["total_input_tokens_estimate"] != tokens:
+        c.fail("dry-run-tokens", case, f"row {row} expected {tokens} tokens over body without assets")
+    scheme, host = urllib_target(base)
+    if host == TYPESAFE_HOST and scheme != "https":
+        host = None
+    price = DRY_RUN_PRICES.get((host, model))
+    cost = None if price is None or "assets" in record else Decimal(price) * tokens / 1000000
+    got = report["estimated_cost_usd"]
+    pricing = report["pricing"]
+    if pricing["input_usd_per_million_tokens"] != price or (got is None) != (cost is None) \
+            or (cost is not None and Decimal(got) != cost) \
+            or pricing["status"] != ("unknown" if price is None else "free" if Decimal(price) == 0 else "priced"):
+        c.fail("dry-run-cost", case, f"pricing {pricing} cost {got!r}, expected price {price!r} cost {cost!r}")
 
 
 # P3. Probabilities and numbers pass through bit for bit; nonfinite values never reach stdout.
@@ -954,7 +1031,7 @@ def check_eval(c):
 
 MUTANTS = [
     ("batch keeps going after a failure", "batch-prefix",
-     [("                    return 1\n                print(", "                    continue\n                print(")]),
+     [("                    return 1\n                if args.dry_run:", "                    continue\n                if args.dry_run:")]),
     ("batch output not flushed per line", "batch-flush-before-next",
      [("allow_nan=False), flush=True)", "allow_nan=False))")]),
     ("TypeSafe origin matched by substring", "auth-only-to-typesafe",
@@ -969,7 +1046,7 @@ MUTANTS = [
      [("    json.dumps(value, allow_nan=False)\n    return value", "    return value"),
       ("allow_nan=False", "allow_nan=True")]),
     ("images header only for assets", "images-header-iff-images",
-     [('if "assets" in record or any(q["type"] == "box" for q in questions.values()):', 'if "assets" in record:')]),
+     [('    if uses_images(payload):\n        headers', '    if "assets" in payload:\n        headers')]),
     ("free backend accepts Box", "box-rejected-locally-on-free",
      [('        return not (urlsplit(self.base_url).hostname == "opencode.ai"',
        '        return True or not (urlsplit(self.base_url).hostname == "opencode.ai"')]),
@@ -1034,6 +1111,22 @@ MUTANTS = [
      [('            with args.labels.open(encoding="utf-8") as labels:',
        '            args.labels.write_text(args.labels.read_text(encoding="utf-8") + " ", encoding="utf-8")\n'
        '            with args.labels.open(encoding="utf-8") as labels:')]),
+    ("dry run reads credentials", "dry-run-no-network-no-credentials",
+     [("api_key() if backend.typesafe and not args.dry_run else None", "api_key() if backend.typesafe else None")]),
+    ("dry run also sends", "dry-run-no-network-no-credentials",
+     [("                return estimate(record, questions, backend)",
+       "                return [classify(record, questions, key, backend, args.timeout), "
+       "estimate(record, questions, backend)][1]")]),
+    ("dry run skips record validation", "dry-run-validates-like-send",
+     [("    payload = request_payload(record, questions, backend)\n    text = ",
+       "    payload = dict(record, questions=questions)\n    text = ")]),
+    ("dry run prices unknown backends at zero", "dry-run-cost",
+     [("return PRICES.get((host, self.model))", 'return PRICES.get((host, self.model), ("0", None))')]),
+    ("dry run counts image assets as text", "dry-run-tokens",
+     [('payload.items() if key != "assets"}', "payload.items()}")]),
+    ("dry run total drops a batch row", "dry-run-total-is-sum",
+     [('total = sum(row["input_tokens_estimate"] for row in rows)',
+       'total = sum(row["input_tokens_estimate"] for row in rows[1:]) or rows[0]["input_tokens_estimate"]')]),
 ]
 
 # Broken variants of scripts/demo_sessions.py, checked the same way.
@@ -1073,6 +1166,8 @@ KNOWN_FINDINGS = {
     "F2 batch blames the record for API response failures":
         lambda prop, case: prop == "batch-blames-right-party"
         and any(k in case for k in ("resp_not_json", "resp_not_utf8", "resp_infinity")),
+    "F3 control character in --base-url gets a TypeSafe dry-run price for a non-TypeSafe urllib target":
+        lambda prop, case: prop == "dry-run-cost" and ("\\n" in case or "\\t" in case),
 }
 
 
