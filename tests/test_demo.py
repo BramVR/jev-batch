@@ -75,10 +75,10 @@ class DemoTests(unittest.TestCase):
             root = Path(tmp)
             folder = root / '.private/demo'
             folder.mkdir(parents=True)
-            records = [{'id': f'synthetic-{i}', 'state': 'test'} for i in range(8)]
-            raw = ''.join(json.dumps(r, indent=None) + '\n' for r in records)
+            records = [{'id': f'synthetic-{i}\u2028', 'state': 'line\u2028separator'} for i in range(8)]
+            raw = ''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in records)
             sample = folder / 'sample.jsonl'
-            sample.write_text(raw)
+            sample.write_text(raw, encoding='utf-8')
             before = hashlib.sha256(sample.read_bytes()).digest()
             shutil.copy(Path(demo.__file__).parents[1] / 'jev.py', root / 'jev.py')
             (root / 'examples').mkdir()
@@ -92,7 +92,7 @@ class DemoTests(unittest.TestCase):
                 self.assertEqual(command[-2:], ['--cache', str(folder / 'cache')])
                 for record in records:
                     stdout.write(json.dumps({'id': record['id'], 'answers': {
-                        'failure_pattern': {'choice': 'fine', 'confidence': 0.95}}}) + '\n')
+                        'failure_pattern': {'choice': 'fine', 'confidence': 0.95}}}, ensure_ascii=False) + '\n')
                 return subprocess.CompletedProcess(command, 0, stderr='')
 
             with patch.object(demo, 'ROOT', root), patch.object(demo, 'prepare_sample') as prepare, \
@@ -104,7 +104,7 @@ class DemoTests(unittest.TestCase):
             self.assertEqual(summary['sample_count'], 8)
             self.assertEqual(summary['classification_counts'], {'fine': 8, 'loop': 0})
             self.assertEqual(summary['example_ids_by_category'], {
-                'fine': ['synthetic-0', 'synthetic-1', 'synthetic-2'], 'loop': []})
+                'fine': ['synthetic-0\u2028', 'synthetic-1\u2028', 'synthetic-2\u2028'], 'loop': []})
             self.assertEqual(summary['confidence']['bins']['0.9-1.0'], 8)
             self.assertEqual(summary['unclassified'], 0)
 

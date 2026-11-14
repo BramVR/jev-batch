@@ -256,8 +256,8 @@ class CliTests(unittest.TestCase):
             if questions is not None:
                 (Path(tmp) / "q.json").write_text(json.dumps(questions))
                 args += ["--questions", str(Path(tmp) / "q.json")]
-            run = subprocess.run(args, env={"PATH": os.environ["PATH"], "HOME": tmp},
-                                 capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+            run = subprocess.run(args, env={"PATH": os.environ["PATH"], "HOME": tmp, "PYTHONIOENCODING": "utf-8"},
+                                 capture_output=True, text=True, encoding="utf-8", timeout=10, stdin=subprocess.DEVNULL)
             self.assertEqual(source.read_text(encoding="utf-8"), raw)
             return run
 

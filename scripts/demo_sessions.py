@@ -105,6 +105,12 @@ def prepare_sample(limit, counts=None):
     return records
 
 
+def read_jsonl(path):
+    # File iteration splits on newlines only; str.splitlines would also split U+2028 inside JSON strings.
+    with path.open(encoding="utf-8") as source:
+        return [json.loads(line) for line in source]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=8)
@@ -118,7 +124,7 @@ def main(argv=None):
     inputs = folder / "sample.jsonl"
     if args.send:
         try:
-            records = [json.loads(line) for line in inputs.read_text(encoding="utf-8").splitlines()]
+            records = read_jsonl(inputs)
         except (OSError, ValueError):
             parser.error("--send requires an existing valid .private/demo/sample.jsonl; prepare and review it first")
         if not 1 <= len(records) <= args.limit:
@@ -143,7 +149,7 @@ def main(argv=None):
                                  input="".join(json.dumps(r, ensure_ascii=False) + "\n" for r in outgoing),
                                  stdout=output, stderr=subprocess.PIPE, encoding="utf-8",
                                  env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-        results = [json.loads(line) for line in (folder / "results.jsonl").read_text(encoding="utf-8").splitlines()]
+        results = read_jsonl(folder / "results.jsonl")
         if [r["id"] for r in results] != summary["session_ids"][:len(results)]:
             raise ValueError("result ids differ from input order")
         counted = subprocess.run([sys.executable, str(ROOT / "jev.py"), "summarize", "--questions",
