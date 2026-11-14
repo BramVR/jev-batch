@@ -417,6 +417,19 @@ class CliTests(unittest.TestCase):
         self.assertEqual(report["total_input_tokens_estimate"],
                          sum(r["input_tokens_estimate"] for r in report["records"]))
 
+    def test_dry_run_ignores_cache(self):
+        records = '{"id":"a","state":"one"}\n{"id":"b","state":"two"}\n'
+        plain = self.dry_run(records)[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = Path(tmp) / "empty"
+            self.assertEqual(self.dry_run(records, "--cache", str(empty))[1], plain)
+            self.assertFalse(empty.exists())
+            warm = Path(tmp) / "warm"
+            self.assertEqual(len(self.run_cli(records, extra=["--cache", str(warm)])[3]), 2)
+            before = {p: p.read_bytes() for p in warm.rglob("*") if p.is_file()}
+            self.assertEqual(self.dry_run(records, "--cache", str(warm))[1], plain)
+            self.assertEqual({p: p.read_bytes() for p in warm.rglob("*") if p.is_file()}, before)
+
     def test_dry_run_process_without_credentials(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "q.json"
