@@ -142,6 +142,12 @@ class CliTests(unittest.TestCase):
                 server.shutdown()
                 worker.join()
 
+    def test_malformed_question_type_is_clean_error(self):
+        with patch.dict(QUESTIONS["route"], {"type": []}):
+            code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}')
+        self.assertEqual((code, out, sent), (1, "", []))
+        self.assertIn("supported text question types", err)
+
     def test_help_as_process(self):
         result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "--help"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0)

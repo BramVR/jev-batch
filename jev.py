@@ -85,7 +85,7 @@ def main(argv=None):
         if not isinstance(questions, dict) or not questions:
             raise JevError("questions must be a nonempty API question mapping")
         for question in questions.values():
-            if not isinstance(question, dict) or question.get("type") not in {"choice", "score", "noul"}:
+            if not isinstance(question, dict) or question.get("type") not in ("choice", "score", "noul"):
                 raise JevError("supported text question types: choice, score, noul; Box needs image support")
         key = api_key()
         if args.command == "classify":
