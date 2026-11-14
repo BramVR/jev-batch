@@ -79,7 +79,7 @@ After reviewing the saved sample and obtaining authorization to send it to the s
 python3 scripts/demo_sessions.py --send
 ```
 
-`--send` reuses the exact existing `.private/demo/sample.jsonl` without resampling or rewriting it. Missing samples fail before transmission. `--limit` must be between 1 and 20; an existing sample larger than the limit is rejected without truncation. Running without `--send` prepares and replaces the sample.
+`--send` reuses the exact existing `.private/demo/sample.jsonl` without resampling or rewriting it, and pipes it to `jev.py batch` as UTF-8 whatever the locale. Missing samples fail before transmission. `--limit` must be between 1 and 20; an existing sample larger than the limit is rejected without truncation. Running without `--send` prepares and replaces the sample.
 
 The script retains trailing user and assistant messages up to 24,000 characters, caps each message at 4,000 characters, and omits tools and reasoning. It writes the redacted inputs, API results, and the counts and example IDs by category beneath ignored `.private/demo/`. Do not commit those files.
 
@@ -94,7 +94,7 @@ Redaction is on by default, under policy `jev-demo-redact-1`. Each message is re
 - `email`: `local@domain.tld` addresses become `[REDACTED:email]`.
 - `home_path`: `/Users/<name>`, `/home/<name>`, and `X:\Users\<name>` (either slash) become `[REDACTED:home]` when they do not follow a word character, `.`, `:`, or a slash. The rest of the path stays.
 
-The summary holds only `redaction.policy` and per-rule `redaction.counts`, never matched text. Prepare counts cover the kept excerpts. Send counts cover the second pass, so they are zero for a sample this version prepared.
+The summary holds only `redaction.policy` and per-rule `redaction.counts`, never matched text. Prepare counts are the complete placeholders in the saved excerpts, so a match past the 4,000-character cap, or a placeholder the cap cuts, is not counted. Send counts cover the second pass, so they are zero for a sample this version prepared.
 
 Limitations. This pattern list does not detect every secret. It misses short values, unprefixed tokens, tokens glued to a preceding letter or digit, secrets without a `key=` label, names, phone numbers, addresses, and paths outside home directories. It also hits some harmless text, for example `git@github.com` reads as an email. Review the saved sample before sending, and remove anything sensitive the rules missed. Placeholders can hide the context a classifier needs.
 

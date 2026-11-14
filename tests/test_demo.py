@@ -187,9 +187,9 @@ class DemoRedactionTests(unittest.TestCase):
                                                  'content': [{'type': 'input_text', 'text': text}]}))
         self.sample = self.root / '.private/demo/sample.jsonl'
 
-    def demo(self, args, base_url='http://127.0.0.1:9/v1'):
+    def demo(self, args, base_url='http://127.0.0.1:9/v1', **extra_env):
         out = io.StringIO()
-        env = {'HOME': str(self.home), 'PATH': os.environ.get('PATH', ''), 'JEV_BASE_URL': base_url}
+        env = {'HOME': str(self.home), 'PATH': os.environ.get('PATH', ''), 'JEV_BASE_URL': base_url, **extra_env}
         with patch.object(demo, 'ROOT', self.root), patch.dict(os.environ, env, clear=True), \
                 contextlib.redirect_stdout(out):
             code = demo.main(args)
@@ -204,8 +204,9 @@ class DemoRedactionTests(unittest.TestCase):
         self.assertIn('[REDACTED:token]', saved)
         summary = json.loads(out)
         self.assertEqual(summary['redaction']['policy'], demo.REDACTION_POLICY)
+        # The straddling token's placeholder is cut by the cap, so only complete placeholders count.
         self.assertEqual(summary['redaction']['counts'], {
-            'assignment': 1, 'bearer': 1, 'email': 1, 'home_path': 3, 'token': 3})
+            'assignment': 1, 'bearer': 1, 'email': 1, 'home_path': 3, 'token': 2})
         before = self.sample.read_bytes()
         with Capture() as server:
             code, out = self.demo(['--send'], server.url)
@@ -227,6 +228,27 @@ class DemoRedactionTests(unittest.TestCase):
         assert_clean(self, ''.join(server.bodies) + out)
         self.assertEqual(json.loads(server.bodies[0])['state']['messages'][0]['role'], 'user')
         self.assertEqual(json.loads(out)['redaction']['counts']['bearer'], 1)
+
+    def test_counts_skip_matches_past_the_cap(self):
+        (self.home / '.codex/sessions/1.jsonl').unlink()
+        (self.home / '.codex/sessions/0.jsonl').write_text(
+            session_line('session_meta', {'id': 'synthetic-0', 'cwd': '/elsewhere'})
+            + session_line('response_item', {'type': 'message', 'role': 'user', 'content': [
+                {'type': 'input_text', 'text': 'x' * 4100 + ' ' + FIXTURE_SECRETS['email']}]}))
+        code, out = self.demo([])
+        self.assertEqual(json.loads(out)['redaction']['counts'], {})
+        assert_clean(self, self.sample.read_text())
+
+    def test_send_is_utf8_whatever_the_inherited_stdio_encoding(self):
+        self.sample.parent.mkdir(parents=True)
+        self.sample.write_text(json.dumps({'id': 'é-1', 'state': 'naïve café ✓'}, ensure_ascii=False) + '\n',
+                               encoding='utf-8')
+        with Capture() as server:
+            code, out = self.demo(['--send'], server.url, PYTHONIOENCODING='ascii')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(server.bodies[0])['state'], 'naïve café ✓')
+        results = (self.root / '.private/demo/results.jsonl').read_text(encoding='utf-8')
+        self.assertEqual(json.loads(results)['id'], 'é-1')
 
     def test_no_redact_is_explicit_opt_out(self):
         code, out = self.demo(['--no-redact'])

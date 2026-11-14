@@ -4,6 +4,7 @@
 import argparse
 from collections import Counter
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -24,6 +25,9 @@ REDACTION_RULES = [
     ("email", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"), "[REDACTED:email]"),
     ("home_path", re.compile(r"(?<![\w.:/\\])(?:/Users|/home|\b[A-Za-z]:[\\/]+Users)[\\/]+[^\\/\s\"'`]+"), "[REDACTED:home]"),
 ]
+
+RULE_BY_LABEL = {re.search(r"\[REDACTED:(\w+)\]", placeholder).group(1): name for name, _, placeholder in REDACTION_RULES}
+PLACEHOLDER = re.compile(r"\[REDACTED:(%s)\]" % "|".join(RULE_BY_LABEL))
 
 
 def redact(value, counts):
@@ -68,12 +72,14 @@ def prepare_sample(limit, counts=None):
                     meta = payload
                 if item.get("type") == "response_item" and payload.get("type") == "message" and payload.get("role") in {"user", "assistant"}:
                     text = "\n".join(c.get("text", "") for c in payload.get("content", []) if c.get("type") in {"input_text", "output_text"})
-                    hits = Counter()
                     if counts is not None:
                         # Redact the whole message before capping so a cut cannot leave half a secret.
-                        text = redact(text, hits)
+                        text = redact(text, Counter())
+                    text = text[:4000]
+                    # Count only placeholders that survive the cap, so counts describe the saved excerpt.
+                    hits = Counter(RULE_BY_LABEL[label] for label in PLACEHOLDER.findall(text)) if counts is not None else Counter()
                     if text:
-                        messages.append(({"role": payload["role"], "text": text[:4000]}, hits))
+                        messages.append(({"role": payload["role"], "text": text}, hits))
         if meta.get("cwd") == str(ROOT) or not messages or not meta.get("id") or meta["id"] in seen:
             continue
         excerpt = []
@@ -135,8 +141,9 @@ def main(argv=None):
             run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "batch", "--questions",
                                   str(ROOT / "examples/failure-patterns.json")],
                                  input="".join(json.dumps(r, ensure_ascii=False) + "\n" for r in outgoing),
-                                 stdout=output, stderr=subprocess.PIPE, text=True)
-        results = [json.loads(line) for line in (folder / "results.jsonl").read_text().splitlines()]
+                                 stdout=output, stderr=subprocess.PIPE, encoding="utf-8",
+                                 env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        results = [json.loads(line) for line in (folder / "results.jsonl").read_text(encoding="utf-8").splitlines()]
         if [r["id"] for r in results] != summary["session_ids"][:len(results)]:
             raise ValueError("result ids differ from input order")
         summary["classification_counts"] = dict(Counter(r["answers"]["failure_pattern"]["choice"] for r in results))
