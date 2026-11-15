@@ -6,9 +6,10 @@ A user picks the backend with `--base-url`/`JEV_BASE_URL` and `--model`/`JEV_MOD
 
 - `backend-env` env vars choose endpoint path and model.
 - `backend-flag` flags override env.
-- `box-free-reject` a Box question on the free `jev-1.13-free` model exits 1 before any request.
+- `box-free-reject` a Box question on host `opencode.ai`, or on any model containing `1.13` or ending in `-free`, exits 1 before any request.
 - `box-image-model` with `--model jev-1.14.0`, assets pass through and `TypeSafe-Danger-Zone-Images: true` is sent.
-- `url-credentials-reject` a base URL with userinfo exits 1.
+- `url-credentials-reject` a base URL with userinfo, a query, a fragment, or a scheme other than HTTP(S) exits 1.
+- `url-unsendable-reject` a base URL with a space, control character, or non-ASCII text exits 1 with a plain `jev:` line, no traceback, before any credential read.
 
 ## How to get to it (user POV)
 

@@ -10,7 +10,7 @@ A user gets help, clear usage errors, and local rejection of bad flags or questi
 - `timeout-guard` nonfinite or nonpositive `--timeout` exits 1.
 - `batch-input-guard` `batch --input` and `eval --input` exit 1; both read stdin only.
 - `questions-guard` empty mapping or unknown question type exits 1, with or without `--dry-run`. Version and wrapper rules live in [question-files](./question-files.md).
-- `retry-concurrency-guard` `--concurrency` outside 1..32 or `--retries` outside 0..10 exits 1 with no request sent; a non-integer value exits 2 from argparse. `eval` and `summarize` send nothing, so they reject either flag with exit 1, as they reject `--cache` and `--dry-run`. `--dry-run` accepts them and ignores them.
+- `retry-concurrency-guard` `--concurrency` outside 1..32 or `--retries` outside 0..10 exits 1 with no request sent; a non-integer value exits 2 from argparse. `eval` and `summarize` send nothing, so they reject either flag with exit 1, as they reject `--cache`, `--dry-run`, and `--chunk-tokens`. `--labels` outside `eval` and `--question` outside `eval` and `summarize` also exit 1. `--dry-run` accepts in-range values and ignores them; out-of-range values still exit 1. Base URL rules are in [Backend selection](./backend-select.md).
 
 ## How to get to it (user POV)
 

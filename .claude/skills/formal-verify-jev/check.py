@@ -32,7 +32,7 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "bd7704ccc5738174ff653738e9aae0a2270857fb",
+    "jev.py": "7c10d7fca5d711868ebeeab43d5f3ea4e6676be0",
     "scripts/demo_sessions.py": "aefdd89b19f0dc1fb55430cdf2227387b93c7bab",
 }
 KEY = "sentinel-key-not-real"
@@ -219,6 +219,8 @@ LINE_KINDS = {
                       body('{"answers":{"q":{"noul":1e999}}}')),
 }
 
+UNPARSEABLE_RESPONSES = ("resp_not_json", "resp_not_utf8", "resp_infinity")
+
 # (concurrency, retries, max depth). Depth 0 means the --depth argument.
 BATCH_MODES = [(1, 0, 0), (1, 2, 0), (2, 1, 2), (3, 2, 2)]
 
@@ -309,6 +311,8 @@ def check_batch_case(c, questions, seq, concurrency, retries):
             c.fail("batch-exit", case, f"stderr {run.stderr!r} lacks the attempt count {results[k][1]}")
         if stages[k] != "local" and "invalid JSON record" in run.stderr:
             c.fail("batch-blames-right-party", case, f"API failure reported as {run.stderr.strip()!r}")
+        if seq[k] in UNPARSEABLE_RESPONSES and run.stderr != f"{prefix}System One returned invalid JSON\n":
+            c.fail("batch-blames-right-party", case, f"unparseable response reported as {run.stderr.strip()!r}")
     if SECRET_BODY in run.stderr + run.stdout:
         c.fail("batch-no-body-leak", case, "HTTP or response body echoed")
 
@@ -435,6 +439,9 @@ BASE_URLS = [
     "ftp://api.typesafe.ai/v1",
     "https://api.typesafe.\nai/v1",
     "https://api.typesafe.ai\t/@evil.example/v1",
+    "https://api.typesafe.ai/v1 ",
+    "https://api.typesafe.ai/v1\x7f",
+    "https://api.typesafe.ai/v\u00e91",
 ]
 MODELS = ["jev-1.13-free", "jev-1.14.0", " "]
 NOUL = {"type": "noul", "instructions": "yes?"}
@@ -608,7 +615,7 @@ def check_numbers(c):
 
 QUESTION_TYPES = ("choice", "score", "noul", "box")
 PRIVATE = "PRIVATE-question-content"
-GENERIC_ERROR = "jev: could not read input, credentials, or API JSON"
+GENERIC_ERROR = "jev: could not read input or credentials"
 EVAL_ENV = {"TYPESAFE_API_KEY": KEY, "JEV_BASE_URL": "https://api.typesafe.ai/v1"}
 QNOUL = {"type": "noul", "instructions": PRIVATE}
 MAPPINGS = [
@@ -967,7 +974,7 @@ def drive_demo(c, argv, sample_lines):
             received = input.encode(encoding or "ascii").decode((env or {}).get("PYTHONIOENCODING") or "ascii")
         except UnicodeError:
             sent.append(None)
-            return types.SimpleNamespace(returncode=1, stderr="jev: could not read input, credentials, or API JSON")
+            return types.SimpleNamespace(returncode=1, stderr=GENERIC_ERROR)
         sent.append(received)
         for line in received.splitlines():
             stdout.write(json.dumps({"id": json.loads(line)["id"], "answers": {"failure_pattern": {"choice": "fine"}}}) + "\n")
@@ -1661,6 +1668,11 @@ def check_chunk(c, depth):
 # Broken variants of jev.py. Each must make the named property fail, or the check proves nothing.
 
 MUTANTS = [
+    ("base URL guard dropped", "request-clean-exit",
+     [('if re.search(r"[^\\x21-\\x7e]", self.base_url):', "if False:")]),
+    ("unparseable API response escapes as a record error", "batch-blames-right-party",
+     [("    except (ValueError, RecursionError):\n        raise JevError(\"System One returned invalid JSON\")",
+       "    except RecursionError:\n        raise JevError(\"System One returned invalid JSON\")")]),
     ("batch keeps going after a failure", "batch-prefix",
      [("                    return 1\n                emit(result)", "                    continue\n                emit(result)")]),
     ("batch window and pool one wider than --concurrency", "batch-in-flight-bound",
@@ -1832,7 +1844,7 @@ MUTANTS = [
     ("chunk usage dropped from audit copy", "chunk-responses-verbatim",
      [('        del result["id"]\n', '        del result["id"]\n        result.pop("usage", None)\n')]),
     ("failed chunk skipped", "chunk-failure-closed",
-     [('            raise JevError(f"chunk {index + 1}/{len(spans)}: {detail}") from None', "            continue")]),
+     [('            raise JevError(f"chunk {index + 1}/{len(spans)}: {exc}") from None', "            continue")]),
     ("chunk label check dropped", "chunk-failure-closed",
      [('set(probabilities) != set(question["criteria"]) or not all(', "not all(")]),
     ("chunked path ignores the cache", "chunk-cache-reuse",
@@ -1886,16 +1898,7 @@ DEMO_MUTANTS = [
 ]
 
 # Violations the current code produces. Each stays listed until the code is fixed; the check fails if one disappears.
-KNOWN_FINDINGS = {
-    "F1 control character in --base-url crashes with a traceback after reading credentials":
-        lambda prop, case: prop in ("request-clean-exit", "credential-read-only-for-typesafe")
-        and ("\\n" in case or "\\t" in case),
-    "F2 batch blames the record for API response failures":
-        lambda prop, case: prop == "batch-blames-right-party"
-        and any(k in case for k in ("resp_not_json", "resp_not_utf8", "resp_infinity")),
-    "F3 control character in --base-url gets a TypeSafe dry-run price for a non-TypeSafe urllib target":
-        lambda prop, case: prop == "dry-run-cost" and ("\\n" in case or "\\t" in case),
-}
+KNOWN_FINDINGS = {}
 
 
 def run_all(jev, demo, depth, only=None):

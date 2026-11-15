@@ -8,7 +8,7 @@
 - `cache-miss` a different model, backend, question mapping, or assets sends a request.
 - `cache-question-forms` a version-1 question file hits the entry its equivalent legacy mapping stored, because only the unwrapped mapping is sent.
 - `cache-resume` after a batch stops at line N because line N exhausted `--retries`, a rerun of the full input sends only lines N onward. A failure is never stored, however many attempts it took.
-- `cache-no-failure` an invalid or failed response writes no entry, so the retry sends again.
+- `cache-no-failure` an invalid response object or an unparseable body writes no entry, so the retry sends again.
 - `cache-corrupt` a corrupt entry is refetched and rewritten, and the next run hits it.
 - `cache-dry-run` `--dry-run` with a warm cache still prices every record and sends nothing, the warm cache keeps serving afterward, and a dry run on a cold cache leaves no entry, so the next real run misses.
 - `cache-demo` `demo_sessions.py --send` caches under `.private/demo/cache`; rerunning the same send makes no request, and no entry holds a redacted fixture value.
@@ -22,7 +22,7 @@
 
 Preconditions:
 
-- Doctor passes. Steps run in order and share cache dirs `cache-a`, `cache-b`, `cache-c` under the run's `work/`, so run the whole journey, not one step.
+- Doctor passes. Steps run in order and share cache dirs `cache-a`, `cache-b`, `cache-c`, `cache-d` under the run's `work/`, so run the whole journey, not one step.
 
 - **All steps.** Run `python3 .claude/skills/verify-jev/verify.py run cache`. Every step prints `PASS`.
 - **Zero-request proof.** The `rerun with new ids` step has no `stub saw` block, and its stdout lines equal the stub body with ids `a2` and `{"n": 2}`.

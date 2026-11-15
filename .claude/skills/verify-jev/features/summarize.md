@@ -24,7 +24,7 @@
 
 Preconditions:
 
-- Doctor passes. The run writes synthetic `results.jsonl` (seven `topic` results, one ID ending in U+2028) `mixed.json` (Choice plus Noul), and `choice.v1.json` (the Choice mapping as a version-1 document) into `work/`.
+- Doctor passes. The run writes synthetic `results.jsonl` (seven `topic` results, one ID ending in U+2028) `mixed.json` (Choice plus Noul), and `choice.v1.json` (the Choice mapping as a version-1 document) into `work/`. Steps also read the shared `choice.json` and `v2.json` fixtures.
 
 - **All steps.** Run `python3 .claude/skills/verify-jev/verify.py run summarize`. Every step prints `PASS`.
 - **Offline proof.** The first step points `--base-url` at the stub with the sentinel key set; the stub records zero requests.

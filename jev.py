@@ -59,6 +59,9 @@ class Backend:
     model: str
 
     def __post_init__(self):
+        # urlsplit silently drops tabs and newlines that urllib keeps; only printable ASCII parses alike in both.
+        if re.search(r"[^\x21-\x7e]", self.base_url):
+            raise JevError("base URL must be printable ASCII without spaces or control characters")
         url = urlsplit(self.base_url)
         if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password or url.query or url.fragment:
             raise JevError("base URL must be an HTTP(S) URL without credentials, query, or fragment")
@@ -283,7 +286,7 @@ def retry_after_seconds(value):
 def send(request, timeout):
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return read_json(response.read().decode("utf-8"))
+            raw = response.read()
     except urllib.error.HTTPError as exc:
         try:
             status = exc.code
@@ -299,6 +302,10 @@ def send(request, timeout):
         raise JevError(f"System One HTTP {status}; not retryable") from None
     except (urllib.error.URLError, TimeoutError, OSError):
         raise Transient("System One connection failed or timed out") from None
+    try:
+        return read_json(raw.decode("utf-8"))
+    except (ValueError, RecursionError):
+        raise JevError("System One returned invalid JSON") from None
 
 
 def backoff_seconds(attempt, retry_after):
@@ -419,10 +426,8 @@ def run_chunks(record, spans, questions, key, backend, timeout, budget, retries,
             result = respond(None, request, timeout, retries, stop, cache,
                              lambda r: probabilities.append({name: choice_probabilities(q, r["answers"].get(name))
                                                              for name, q in questions.items()}))
-        except (JevError, ValueError, UnicodeError) as exc:
-            # The record already parsed, so a ValueError here is the API response.
-            detail = str(exc) if isinstance(exc, JevError) else "System One returned invalid JSON"
-            raise JevError(f"chunk {index + 1}/{len(spans)}: {detail}") from None
+        except JevError as exc:
+            raise JevError(f"chunk {index + 1}/{len(spans)}: {exc}") from None
         del result["id"]
         chunks.append({"index": index, "start": start, "end": end,
                        "estimated_tokens": utf8_tokens(text), "response": result})
@@ -740,7 +745,7 @@ def main(argv=None):
         print("jev: " + str(exc), file=sys.stderr)
         return 1
     except (ValueError, OSError, UnicodeError, subprocess.SubprocessError, RecursionError):
-        print("jev: could not read input, credentials, or API JSON", file=sys.stderr)
+        print("jev: could not read input or credentials", file=sys.stderr)
         return 1
     return 0
 

@@ -14,7 +14,7 @@
 - `chunk-batch` batch lines chunk independently. Small lines keep plain output. Under `--concurrency`, records run in parallel and their chunks run one after another, so output keeps input order.
 - `chunk-retry` a transient chunk failure is retried under `--retries` and only that chunk is resent.
 - `chunk-dry-run` `--dry-run --chunk-tokens` prices every chunk request and sends nothing. `summarize` and `eval` reject the flag.
-- `chunk-failure` any failed chunk exits 1 naming `chunk i/n`, prints no aggregate, and sends no later chunk.
+- `chunk-failure` any failed chunk, including an unparseable response (`chunk i/n: System One returned invalid JSON`), exits 1 naming `chunk i/n`, prints no aggregate, and sends no later chunk.
 - `chunk-guards` non-Choice questions, object or array state, assets, and budgets outside 1..32000 or too small for the question overhead exit 1 before any request.
 
 ## How to get to it (user POV)
