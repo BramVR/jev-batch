@@ -1844,7 +1844,7 @@ MUTANTS = [
     ("chunk usage dropped from audit copy", "chunk-responses-verbatim",
      [('        del result["id"]\n', '        del result["id"]\n        result.pop("usage", None)\n')]),
     ("failed chunk skipped", "chunk-failure-closed",
-     [('            raise JevError(f"chunk {index + 1}/{len(spans)}: {detail}") from None', "            continue")]),
+     [('            raise JevError(f"chunk {index + 1}/{len(spans)}: {exc}") from None', "            continue")]),
     ("chunk label check dropped", "chunk-failure-closed",
      [('set(probabilities) != set(question["criteria"]) or not all(', "not all(")]),
     ("chunked path ignores the cache", "chunk-cache-reuse",
