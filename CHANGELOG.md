@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reject a `--base-url` with spaces, control characters, or non-ASCII text before reading credentials, instead of crashing with a traceback or pricing a dry run for a host urllib would not contact; batch now reports an unparseable API response as `System One returned invalid JSON` instead of blaming the input line.
+
 - Add opt-in `--chunk-tokens` to split long string state for Choice questions into bounded requests and aggregate by exact equal-weight mean probability, keeping every chunk response for audit; chunks retry, cache, and dry-run like any request, and label-rejected chunk answers are never cached.
 
 - Retry 429, 5xx, connection errors, timeouts, and `Endpoint is unavailable` error bodies (any status except 401, 403, 422) with capped, jittered exponential backoff that honors `Retry-After`; add `--retries` (default 3) and bounded, order-preserving batch `--concurrency` (default 1).
