@@ -12,6 +12,7 @@
 - `classify-retry-recovers` HTTP 503 then 200 prints the normal result after two requests.
 - `classify-permanent-error` HTTP 401 and 422 make one request each and exit 1 with `not retryable`.
 - `classify-unavailable-phrase` an error body containing `Endpoint is unavailable` makes a 404 retryable (two requests, then the normal result). A 404 without it, and a 401 with it, make one request and exit 1 with `not retryable`.
+- `classify-bad-response` a 200 body that is not UTF-8 JSON with finite numbers exits 1 with `System One returned invalid JSON` after one request; it is never retried. A JSON body that is not an object with an `answers` object, or that carries its own `id`, also exits 1.
 - `classify-timeout` a slow backend past `--timeout` with `--retries 0` makes one request and exits 1.
 
 ## How to get to it (user POV)
