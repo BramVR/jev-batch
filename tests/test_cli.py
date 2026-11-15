@@ -38,7 +38,7 @@ class CliTests(unittest.TestCase):
             body = response(request) if callable(response) else response
             if isinstance(body, Exception):
                 raise body
-            return contextlib.closing(io.BytesIO(json.dumps(body).encode()))
+            return contextlib.closing(io.BytesIO(body if isinstance(body, bytes) else json.dumps(body).encode()))
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "q.json"
@@ -103,6 +103,33 @@ class CliTests(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(sent[0][0].get_header("Authorization"), "Bearer keychain-key")
         self.assertEqual(keychain.call_count, 1)
+
+    def test_unsendable_base_url_rejected_before_credentials(self):
+        # urlsplit drops tabs and newlines that urllib keeps, so Backend and urllib saw different hosts.
+        for url in ("https://api.typesafe.\nai/v1", "https://api.typesafe.ai\t/@evil.example/v1",
+                    "https://api.typesafe.ai/v1 ", " https://api.typesafe.ai/v1", "https://api.typesafe.ai/v1\x7f",
+                    "https://api.typesafe.ai/vé1"):
+            for command, extra in (("classify", []), ("batch", []), ("classify", ["--dry-run"]), ("batch", ["--dry-run"])):
+                with self.subTest(url=url, command=command, extra=extra), \
+                     patch("jev.api_key") as key, patch("subprocess.run") as keychain:
+                    code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}\n', command,
+                                                        extra=["--base-url", url, "--model", "jev-1.14.0", *extra])
+                    self.assertEqual((code, out, sent), (1, "", []))
+                    self.assertEqual(err, "jev: base URL must be printable ASCII without spaces or control characters\n")
+                    key.assert_not_called()
+                    keychain.assert_not_called()
+
+    def test_bad_api_response_blames_the_api_not_the_record(self):
+        for body in (b"not json", b"\xff", b'{"answers":{"q":Infinity}}'):
+            with self.subTest(body=body[:20]):
+                replies = iter((RESPONSE, body))
+                code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}\n{"id":2,"state":"ok"}\n',
+                                                    response=lambda r: next(replies))
+                self.assertEqual((code, len(sent)), (1, 2))
+                self.assertEqual([json.loads(x)["id"] for x in out.splitlines()], [1])
+                self.assertEqual(err, "jev: batch stopped at line 2; System One returned invalid JSON\n")
+                code, out, err, _ = self.run_cli('{"id":1,"state":"ok"}', "classify", response=body)
+                self.assertEqual((code, out, err), (1, "", "jev: System One returned invalid JSON\n"))
 
     def test_box_and_assets_backend_support(self):
         for extra in ([], ["--base-url", "https://api.typesafe.ai/v1", "--model", "jev-1.13.0"]):
