@@ -6,6 +6,7 @@
 
 - `batch-order` output order follows input; duplicate IDs stay duplicated; an ID holding U+2028 stays on its own output line.
 - `batch-api-failure` an API failure on line N with `--retries 0` exits 1 with `batch stopped at line N`, keeps lines 1..N-1, and sends nothing after N at concurrency 1.
+- `batch-bad-response` a line-2 response that is not JSON exits 1 with `batch stopped at line 2; System One returned invalid JSON`, never `invalid JSON record`, and keeps line 1.
 - `batch-retry-recovers` 429 with `Retry-After: 1`, then 503, then 200 on line 1 still yields exactly one result per line in input order, and the run waits at least the `Retry-After` second.
 - `batch-retry-exhausted` line 2 failing every attempt exits 1 naming line 2 with `gave up after N attempts`, keeps line 1, and sends nothing for line 3.
 - `batch-concurrency` `--concurrency 3` never has more than 3 requests at the stub at once, and output order equals input order although later lines finish first.
@@ -33,5 +34,3 @@ Preconditions:
 - Output uses `ensure_ascii=False`, so U+2028 can appear raw inside a line. Split JSONL on `\n` only, never `str.splitlines()`.
 - The stub answers in arrival order, not line order. Under concurrency, the queue entries are not tied to specific lines, so concurrency steps queue identical successful replies and vary only the delay.
 - Ctrl-C exits 130 with `batch stopped at line N; interrupted` after running requests finish. No journey drives a signal; drive it ad hoc if that path changes.
-
-- Stderr for an unparseable API response says `invalid JSON record`, blaming the input line. This is known finding F2 in `formal-verify-jev`; do not assert that wording as correct behavior.
