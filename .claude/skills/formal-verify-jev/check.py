@@ -32,7 +32,7 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "86ab26471feed548b54d75ec07457782bd27a503",
+    "jev.py": "bf85d845a67c9ca649adec1190e8ece2da10065c",
     "scripts/demo_sessions.py": "85993fe7c2e4d7f521fd2e2e5f3d7382f5a1fb1b",
 }
 KEY = "sentinel-key-not-real"
@@ -1696,7 +1696,7 @@ MUTANTS = [
     ("backoff never grows", "retry-backoff-schedule",
      [("BACKOFF_BASE_SECONDS * 2 ** (attempt - 1)", "BACKOFF_BASE_SECONDS")]),
     ("unavailable phrase retries auth failures", "retry-attempts",
-     [("status not in (401, 403, 422) and ENDPOINT_UNAVAILABLE", "ENDPOINT_UNAVAILABLE")]),
+     [("status not in NEVER_RETRIED and ENDPOINT_UNAVAILABLE", "ENDPOINT_UNAVAILABLE")]),
     ("batch output not flushed per line", "batch-window",
      [("allow_nan=False), flush=True)", "allow_nan=False))")]),
     ("TypeSafe origin matched by substring", "auth-only-to-typesafe",
