@@ -228,6 +228,7 @@ The agent workflow lives in [SKILL.md](SKILL.md). Local demo status lives in [do
 ## Verify
 
 ```sh
+python3 scripts/lint.py
 python3 -m unittest discover -s tests -v
 python3 -m compileall -q jev.py scripts tests
 python3 jev.py --help

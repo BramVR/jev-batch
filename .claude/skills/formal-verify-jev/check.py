@@ -32,8 +32,8 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "61ce94e9589e9a39655130d6df6547f05d0288e2",
-    "scripts/demo_sessions.py": "f94cc67ba3329e75c13f4770f3810a533b411938",
+    "jev.py": "fef1932a1b0f6d5a7432dd746d21a4cd4e6f30d8",
+    "scripts/demo_sessions.py": "a5d90dfeddeadf6cf174e33024d00d46f0c58709",
 }
 KEY = "sentinel-key-not-real"
 SECRET_BODY = "SECRET-BODY-must-not-leak"
@@ -913,7 +913,7 @@ def check_redact_before_cap(c):
             (sessions / "s.jsonl").write_text("".join(json.dumps(x) + "\n" for x in (
                 {"type": "session_meta", "payload": {"id": "s", "cwd": "/elsewhere"}},
                 {"type": "response_item", "payload": {"type": "message", "role": "user",
-                                                      "content": [{"type": "input_text", "text": message}]}})))
+                                                      "content": [{"type": "input_text", "text": message}]}})), encoding="utf-8")
             counts = Counter()
             with patch.dict(os.environ, {"HOME": str(home)}):
                 records = c.demo.prepare_sample(1, counts)
@@ -961,12 +961,12 @@ def drive_demo(c, argv, sample_lines):
     folder = root / ".private/demo"
     folder.mkdir(parents=True, exist_ok=True)
     (root / "examples").mkdir(exist_ok=True)
-    (root / "examples/failure-patterns.json").write_text(json.dumps({"failure_pattern": {"type": "choice", "criteria": {"fine": "F"}}}))
+    (root / "examples/failure-patterns.json").write_text(json.dumps({"failure_pattern": {"type": "choice", "criteria": {"fine": "F"}}}), encoding="utf-8")
     sample = folder / "sample.jsonl"
     if sample_lines is None:
         sample.unlink(missing_ok=True)
     else:
-        sample.write_text("".join(json.dumps(r) + "\n" for r in sample_lines))
+        sample.write_text("".join(json.dumps(r) + "\n" for r in sample_lines), encoding="utf-8")
     before = sample.read_bytes() if sample.exists() else None
     sent, commands = [], []
     # jev.py pins its own stdio to UTF-8 when the stdio-utf8 probe says so; otherwise it follows PYTHONIOENCODING.
@@ -1006,7 +1006,7 @@ def drive_demo(c, argv, sample_lines):
         except BaseException:
             code = "crash: " + traceback.format_exc(limit=-1).strip()
     after = sample.read_bytes() if sample.exists() else None
-    summary = (folder / "summary.json").read_text() if (folder / "summary.json").exists() else ""
+    summary = (folder / "summary.json").read_text(encoding="utf-8") if (folder / "summary.json").exists() else ""
     (folder / "summary.json").unlink(missing_ok=True)
     c.last_summary = json.loads(summary) if summary else {}
     return code, sent, before == after, out.getvalue() + err.getvalue() + summary, commands
@@ -1963,7 +1963,7 @@ def triage(violations):
 
 
 def git(*args):
-    return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True).stdout.strip()
+    return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, encoding="utf-8").stdout.strip()
 
 
 def stale():

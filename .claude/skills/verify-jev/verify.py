@@ -153,7 +153,7 @@ def clean(text):
 
 
 def sample(build_dir):
-    return (build_dir / ".private/demo/sample.jsonl").read_text()
+    return (build_dir / ".private/demo/sample.jsonl").read_text(encoding="utf-8")
 
 
 def write_unicode_sample(build_dir):
@@ -170,12 +170,12 @@ def demo_cache_clean(build_dir):
 def write_old_sample(build_dir):
     path = build_dir / ".private/demo/sample.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"id": "old-1", "state": {"messages": [{"role": "user", "text": DEMO_TEXT}]}}) + "\n")
+    path.write_text(json.dumps({"id": "old-1", "state": {"messages": [{"role": "user", "text": DEMO_TEXT}]}}) + "\n", encoding="utf-8")
 
 
 def corrupt_cache(work):
     for entry in (work / "cache-c").rglob("*.json"):
-        entry.write_text('{"version": 1, "key": "trunc')
+        entry.write_text('{"version": 1, "key": "trunc', encoding="utf-8")
 
 
 def no_cache_entries(name):
@@ -762,7 +762,7 @@ def build(run_dir, ref):
                 shutil.copy2(src, target / rel)
     else:
         archive = subprocess.run(["git", "-C", str(ROOT), "archive", ref], capture_output=True, check=True).stdout
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        with tarfile.open(fileobj=io.BytesIO(archive), encoding="utf-8") as tar:
             tar.extractall(target, filter="data")
     subprocess.run([sys.executable, "-m", "compileall", "-q", "jev.py", "scripts"], cwd=target, check=True)
     return target
@@ -874,7 +874,7 @@ def cmd_run(args):
         if not args.keep_build:
             shutil.rmtree(run_dir / "build", ignore_errors=True)
             shutil.rmtree(run_dir / "work", ignore_errors=True)
-    head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, encoding="utf-8").stdout.strip()
     (evidence / "results.json").write_text(json.dumps({"ref": args.ref, "head": head, "live": args.live,
                                                        "journeys": results}, indent=1, ensure_ascii=False), encoding="utf-8")
     transcript(results, evidence / "transcript.md")
@@ -893,10 +893,10 @@ def cmd_doctor(args):
     print(f"python {sys.version.split()[0]} at {sys.executable}")
     if sys.version_info < (3, 9):
         problems.append("python3 >= 3.9 required")
-    head = subprocess.run(["git", "-C", str(ROOT), "status", "-sb", "--porcelain"], capture_output=True, text=True)
+    head = subprocess.run(["git", "-C", str(ROOT), "status", "-sb", "--porcelain"], capture_output=True, encoding="utf-8")
     print("git: " + (head.stdout.splitlines() or ["?"])[0] + f", {len(head.stdout.splitlines()) - 1} changed paths")
     compiled = subprocess.run([sys.executable, "-c", f"import ast;ast.parse(open({str(ROOT / 'jev.py')!r}).read())"],
-                              capture_output=True, text=True)
+                              capture_output=True, encoding="utf-8")
     if compiled.returncode:
         problems.append("jev.py does not parse")
     try:

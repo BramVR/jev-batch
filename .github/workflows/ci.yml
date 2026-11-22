@@ -24,6 +24,8 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
+      - name: lint
+        run: python3 scripts/lint.py
       - name: tests
         run: python3 -m unittest discover -s tests -v
       - name: verify-jev offline journeys

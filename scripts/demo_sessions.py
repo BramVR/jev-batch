@@ -163,7 +163,7 @@ def main(argv=None):
         summary["diagnostic"] = run.stderr.strip()
     else:
         summary["diagnostic"] = "Prepared only; --send required for API call"
-    (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    (folder / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2))
     return summary.get("api_exit_code", 0)
 

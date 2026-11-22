@@ -149,7 +149,7 @@ def api_key():
     if not key and sys.platform == "darwin":
         result = subprocess.run(
             ["/usr/bin/security", "find-generic-password", "-s", "typesafe", "-w"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, encoding="utf-8", timeout=15,
         )
         if result.returncode == 0:
             key = result.stdout.strip()
