@@ -2,8 +2,7 @@
 """Repo lint for mistakes reviewers kept catching. Run: python3 scripts/lint.py [files...]
 
 implicit-encoding  text I/O that falls back to the locale encoding. JSON, JSONL, and fixtures here are UTF-8.
-jsonl-splitlines   str.splitlines() also splits U+2028/U+2029 inside JSON strings. Already common in
-                   tests, so it is a ratchet: a file may not gain calls beyond SPLITLINES_BASELINE.
+jsonl-splitlines   str.splitlines() also splits U+2028/U+2029 inside JSON strings.
 
 Exception, on the offending line only:
     # lint-allow: <rule> reason="<why>" expires=YYYY-MM-DD approved-by=<github login of the approving human>
@@ -19,15 +18,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 ALLOW = re.compile(r'#\s*lint-allow:\s*(?P<rule>[\w-]+)\s+reason="(?P<reason>[^"]+)"\s+'
                    r'expires=(?P<expires>\d{4}-\d{2}-\d{2})\s+approved-by=(?P<who>[\w-]+)')
-# Lower an entry when you remove calls; never raise one. New files start at 0.
-SPLITLINES_BASELINE = {
-    ".claude/skills/formal-verify-jev/check.py": 12,
-    ".claude/skills/verify-jev/verify.py": 5,
-    "tests/test_chunking.py": 2,
-    "tests/test_cli.py": 12,
-}
 SUBPROCESS_TEXT = {"run", "Popen", "check_output", "check_call", "call"}
 UTF8 = 'pass encoding="utf-8"'
+SPLITLINES = ("str.splitlines() also splits U+2028/U+2029 inside JSON strings; iterate the file, stream, "
+              "or io.StringIO(text) (splits on \\n only), or use text.split(\"\\n\")")
 
 
 def keyword(call, name):
@@ -78,7 +72,7 @@ def allowed(line, rule, path, number, errors):
 
 
 def lint(path, text):
-    errors, splitlines = [], 0
+    errors = []
     lines = text.split("\n")
     for node in ast.walk(ast.parse(text, str(path))):
         if not isinstance(node, ast.Call):
@@ -89,15 +83,7 @@ def lint(path, text):
             errors.append(f"{path}:{node.lineno}: implicit-encoding: {problem}")
         if isinstance(node.func, ast.Attribute) and node.func.attr == "splitlines" \
                 and not allowed(line, "jsonl-splitlines", path, node.lineno, errors):
-            splitlines += 1
-    baseline = SPLITLINES_BASELINE.get(str(path), 0)
-    if splitlines > baseline:
-        errors.append(f"{path}: jsonl-splitlines: {splitlines} .splitlines() calls, baseline {baseline}. str.splitlines "
-                      "also splits U+2028/U+2029 inside JSON strings; iterate the file or stream (splits on \\n only) "
-                      "or use text.split(\"\\n\")")
-    elif splitlines < baseline:
-        errors.append(f"{path}: jsonl-splitlines: {splitlines} .splitlines() calls, baseline {baseline}; "
-                      f"lower SPLITLINES_BASELINE[{str(path)!r}] to {splitlines} in scripts/lint.py")
+            errors.append(f"{path}:{node.lineno}: jsonl-splitlines: {SPLITLINES}")
     return errors
 
 

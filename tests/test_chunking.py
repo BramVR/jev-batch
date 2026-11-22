@@ -111,7 +111,7 @@ class ChunkingTests(unittest.TestCase):
         records = "\n".join(json.dumps({"id": i, "state": "x" * 20}) for i in (1, 2))
         code, out, err, sent = self.run_cli(records, [answer(0.75, 0.25)] * 3 + [error], command="batch")
         self.assertEqual(code, 1)
-        self.assertEqual([json.loads(line)["id"] for line in out.splitlines()], [1])
+        self.assertEqual([json.loads(line)["id"] for line in io.StringIO(out)], [1])
         self.assertIn("line 2; chunk 2/2: System One HTTP 500; gave up after 1 attempt", err)
         self.assertNotIn("secret", err)
         self.assertEqual(len(sent), 4)
@@ -127,7 +127,7 @@ class ChunkingTests(unittest.TestCase):
         records = "\n".join(json.dumps({"id": i, "state": "x" * 20}) for i in range(4))
         code, out, err, sent = self.run_cli(records, [answer(0.5, 0.5)] * 8, command="batch", extra=["--concurrency", "3"])
         self.assertEqual((code, err, len(sent)), (0, "", 8))
-        self.assertEqual([json.loads(line)["id"] for line in out.splitlines()], [0, 1, 2, 3])
+        self.assertEqual([json.loads(line)["id"] for line in io.StringIO(out)], [0, 1, 2, 3])
 
     def test_dry_run_estimates_every_chunk(self):
         code, out, err, sent = self.run_cli(json.dumps({"id": 1, "state": "x" * 25}), [], extra=["--dry-run"])
