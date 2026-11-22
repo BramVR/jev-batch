@@ -6,6 +6,7 @@ from collections import Counter
 import contextlib
 from fractions import Fraction
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal
 import http.client
 import io
@@ -374,16 +375,24 @@ def check_batch_dry_run(c, questions, seq, lines, stages):
 STATUSES = [400, 401, 403, 404, 408, 409, 422, 428, 429, 499, 500, 502, 503, 504, 529, 599]
 ERROR_BODIES = [SECRET_BODY.encode(), (SECRET_BODY + ' {"error":{"message":"Endpoint is unavailable"}}').encode(),
                 (SECRET_BODY + " endpoint is unavailable").encode()]
-RETRY_AFTER = {None: None, "0": 0, "2": 2, "120": 30, "Wed, 21 Oct 2015 07:28:00 GMT": 0, "soon": None, "-1": None,
-               "1.5": None}
+RETRY_CLOCK = datetime(2026, 1, 1, tzinfo=timezone.utc)
+RETRY_AFTER = {None: None, "0": 0, "2": 2, "120": 30, "Wed, 21 Oct 2015 07:28:00 GMT": 0,
+               "Thu, 01 Jan 2026 00:00:10 GMT": 10, "Fri, 01 Jan 2100 00:00:00 GMT": 30, "soon": None, "-1": None, "1.5": None}
 NETWORK_ERRORS = [urllib.error.URLError("refused"), TimeoutError(), ConnectionResetError()]
+
+
+class FixedClock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return RETRY_CLOCK if tz else RETRY_CLOCK.replace(tzinfo=None)
 
 
 def check_retry_policy(c):
     questions = c.questions_file({"q": NOUL})
     failures = [("http", status, error_body, ra) for status in STATUSES for error_body in ERROR_BODIES
                 for ra in RETRY_AFTER] + [("net", exc, None, None) for exc in NETWORK_ERRORS]
-    for (kind, what, error_body, ra), retries in itertools.product(failures, (0, 1, 3)):
+    # Eight retries reach the 30-second cap on exponential backoff.
+    for (kind, what, error_body, ra), retries in itertools.product(failures, (0, 1, 3, 8)):
         c.cases += 1
         if kind == "http":
             status = what
@@ -399,8 +408,9 @@ def check_retry_policy(c):
         else:
             transient, reason, respond = True, "System One connection failed or timed out", raiser(what)
         waits = []
-        run = drive(c.jev, ["classify", "--questions", questions, "--retries", str(retries)], '{"id":1,"state":"x"}',
-                    respond=respond, waits=waits, jitter=lambda low, high: high)
+        with patch.object(c.jev, "datetime", FixedClock):
+            run = drive(c.jev, ["classify", "--questions", questions, "--retries", str(retries)], '{"id":1,"state":"x"}',
+                        respond=respond, waits=waits, jitter=lambda low, high: high)
         case = f"retry {kind} {what!r} body={error_body[-30:] if error_body else None!r} retry-after={ra!r} r={retries}"
         if not c.clean_exit("retry-clean-exit", case, run):
             continue
@@ -1693,6 +1703,15 @@ MUTANTS = [
        'raise Transient(f"System One HTTP {status}") from None')]),
     ("Retry-After ignored", "retry-backoff-schedule",
      [("    if retry_after is not None:\n        return min(", "    if False:\n        return min(")]),
+    ("future Retry-After date ignored", "retry-backoff-schedule",
+     [("    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())", "    return 0.0")]),
+    ("near-future Retry-After date waits the full cap", "retry-backoff-schedule",
+     [("    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())", "    return 30.0 if when > datetime.now(timezone.utc) else 0.0")]),
+    ("Retry-After date compared to a naive clock", "retry-clean-exit",
+     [("    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())",
+       "    return max(0.0, (when - datetime.now()).total_seconds())")]),
+    ("exponential backoff uncapped", "retry-backoff-schedule",
+     [("random.uniform(0, min(BACKOFF_CAP_SECONDS, BACKOFF_BASE_SECONDS * 2 ** (attempt - 1)))", "random.uniform(0, BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))")]),
     ("backoff never grows", "retry-backoff-schedule",
      [("BACKOFF_BASE_SECONDS * 2 ** (attempt - 1)", "BACKOFF_BASE_SECONDS")]),
     ("unavailable phrase retries auth failures", "retry-attempts",
