@@ -12,7 +12,6 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 REDACTION_POLICY = "jev-demo-redact-1"
-# Applied in order to every string value; keys, IDs, and structure stay unchanged.
 REDACTION_RULES = [
     ("private_key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)", re.S), "[REDACTED:private_key]"),
     ("bearer", re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1[REDACTED:bearer]"),
@@ -30,7 +29,6 @@ PLACEHOLDER = re.compile(r"\[REDACTED:(%s)\]" % "|".join(RULE_BY_LABEL))
 
 
 def redact(value, counts):
-    """Return a copy of nested JSON with sensitive strings replaced; add per-rule hits to counts."""
     if isinstance(value, str):
         for name, pattern, placeholder in REDACTION_RULES:
             value, hits = pattern.subn(placeholder, value)
@@ -52,7 +50,6 @@ def redact_records(records):
 
 
 def prepare_sample(limit, counts=None):
-    """Return up to limit records; with counts, redact each message and tally kept redactions there."""
     records = []
     seen = set()
     paths = sorted((Path.home() / ".codex/sessions").rglob("*.jsonl"),
@@ -105,7 +102,6 @@ def prepare_sample(limit, counts=None):
 
 
 def read_jsonl(path):
-    # File iteration splits on newlines only; str.splitlines would also split U+2028 inside JSON strings.
     with path.open(encoding="utf-8") as source:
         return [json.loads(line) for line in source]
 

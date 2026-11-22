@@ -43,7 +43,6 @@ BACKOFF_BASE_SECONDS = 0.5
 BACKOFF_CAP_SECONDS = 30.0
 ERROR_BODY_LIMIT = 4096
 ENDPOINT_UNAVAILABLE = b"Endpoint is unavailable"
-# (hostname, model) -> (input USD per million tokens, source). Both sources list output tokens as free.
 PRICES = {
     ("opencode.ai", "jev-1.13-free"): ("0", ZEN_PRICES),
     ("opencode.ai", "jev-1.13"): ("0.042", ZEN_PRICES),
@@ -106,8 +105,6 @@ CACHE_VERSION = 1
 
 @dataclass(frozen=True)
 class Cache:
-    """Validated System One responses keyed by endpoint and exact request body."""
-
     root: Path
 
     def path(self, endpoint, body):
@@ -389,7 +386,6 @@ def check_chunk_questions(questions, budget):
 
 
 def chunk_plan(record, questions, budget):
-    """Validate a record for chunking and return its character spans; one span means send it unchanged."""
     if not isinstance(record, dict) or "id" not in record or "state" not in record:
         raise JevError("record must be an object with id and state")
     if not isinstance(record["state"], str) or "assets" in record:
@@ -646,8 +642,6 @@ def summarize(lines, question=None, questions=None):
 
 
 def build_parser():
-    """Each command declares only the flags it uses, so a flag on the wrong command is an argparse usage error.
-    allow_abbrev=False: otherwise classify would read --question as an abbreviation of --questions."""
     questions_help = (f"JSON questions file: raw API mapping or "
                       f"{{schema_version: {'|'.join(map(str, SCHEMA_VERSIONS))}, questions}}")
     sending = argparse.ArgumentParser(add_help=False)
@@ -688,7 +682,6 @@ def build_parser():
 
 
 def main(argv=None):
-    # JSONL is UTF-8 whatever the locale says; callers need not set PYTHONIOENCODING.
     for stream in (sys.stdin, sys.stdout, sys.stderr):
         if isinstance(stream, io.TextIOWrapper):
             stream.reconfigure(encoding="utf-8")
@@ -770,7 +763,6 @@ def run_summarize(args):
         if question is None and len(questions) == 1:
             question = next(iter(questions))
     if args.input:
-        # File iteration splits on newlines only, like stdin; str.splitlines would also split U+2028 inside JSON strings.
         with args.input.open(encoding="utf-8") as source:
             summary = summarize(source, question, questions)
     else:

@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""Repo lint for mistakes reviewers kept catching. Run: python3 scripts/lint.py [files...]
-
-implicit-encoding  text I/O that falls back to the locale encoding. JSON, JSONL, and fixtures here are UTF-8.
-jsonl-splitlines   str.splitlines() also splits U+2028/U+2029 inside JSON strings.
-
-Exception, on the offending line only:
-    # lint-allow: <rule> reason="<why>" expires=YYYY-MM-DD approved-by=<github login of the approving human>
-"""
-
 import ast
 from datetime import date
 from pathlib import Path
@@ -29,7 +20,6 @@ def keyword(call, name):
 
 
 def text_mode(call, position):
-    """True for a text-mode open, False for binary, None when the mode is not a literal."""
     mode = keyword(call, "mode") or (call.args[position] if len(call.args) > position else None)
     if mode is None:
         return True

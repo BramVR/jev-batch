@@ -106,7 +106,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(keychain.call_count, 1)
 
     def test_unsendable_base_url_rejected_before_credentials(self):
-        # urlsplit drops tabs and newlines that urllib keeps, so Backend and urllib saw different hosts.
         for url in ("https://api.typesafe.\nai/v1", "https://api.typesafe.ai\t/@evil.example/v1",
                     "https://api.typesafe.ai/v1 ", " https://api.typesafe.ai/v1", "https://api.typesafe.ai/v1\x7f",
                     "https://api.typesafe.ai/vé1"):
@@ -166,7 +165,6 @@ class CliTests(unittest.TestCase):
                                       headers or {}, io.BytesIO(body))
 
     def test_permanent_http_errors_fail_once_without_echoing_body(self):
-        # The unavailable phrase never makes auth or validation failures retryable.
         for status, body in ((400, b"secret"), (404, b"secret"), (401, b"secret Endpoint is unavailable"),
                              (403, b"secret Endpoint is unavailable"), (422, b"secret Endpoint is unavailable")):
             code, out, err, sent = self.run_cli('{"id":1,"state":"private"}', "classify", self.http_error(status, body))
@@ -523,7 +521,6 @@ class CliTests(unittest.TestCase):
             self.assertIn("the following arguments are required: --questions", run.stderr)
 
     def test_each_command_rejects_flags_it_does_not_declare(self):
-        # Derived from the parser itself: a flag any command declares is a usage error on every command that does not.
         commands = next(a for a in jev.build_parser()._actions if isinstance(a, argparse._SubParsersAction)).choices
         declared = {name: {flag for action in sub._actions for flag in action.option_strings}
                     for name, sub in commands.items()}
@@ -739,7 +736,6 @@ class CliTests(unittest.TestCase):
         self.assertNotEqual(Decimal(report["estimated_cost_usd"]), 0)
 
     def test_stdio_is_utf8_whatever_the_locale(self):
-        # Regression: with an ASCII locale, UTF-8 JSONL made every command fail with "could not read input".
         env = {"PATH": os.environ["PATH"], "PYTHONIOENCODING": "ascii", "LC_ALL": "C"}
         result = {"id": "s\u00e9\u2028", "answers": {"q": {"type": "choice", "choice": "a", "confidence": 0.5}}}
         run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "summarize"], env=env, capture_output=True,

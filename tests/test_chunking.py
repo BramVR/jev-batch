@@ -83,7 +83,6 @@ class ChunkingTests(unittest.TestCase):
         code, out, err, _ = self.run_cli(json.dumps({"id": "r", "state": "x" * 20}), chunks)
         self.assertEqual((code, err), (0, ""))
         result = json.loads(out)
-        # a = (0.75 + 0.125) / 2, b = (0.25 + 0.875) / 2
         self.assertEqual(result["answers"], {"route": {"type": "choice", "choice": "b", "confidence": 0.5625,
                                                        "probabilities": {"a": 0.4375, "b": 0.5625}}})
         self.assertEqual([c["response"] for c in result["chunks"]], chunks)
