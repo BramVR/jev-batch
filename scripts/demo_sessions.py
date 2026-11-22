@@ -69,10 +69,8 @@ def prepare_sample(limit, counts=None):
                 if item.get("type") == "response_item" and payload.get("type") == "message" and payload.get("role") in {"user", "assistant"}:
                     text = "\n".join(c.get("text", "") for c in payload.get("content", []) if c.get("type") in {"input_text", "output_text"})
                     if counts is not None:
-                        # Redact the whole message before capping so a cut cannot leave half a secret.
                         text = redact(text, Counter())
                     text = text[:4000]
-                    # Count only placeholders that survive the cap, so counts describe the saved excerpt.
                     hits = Counter(RULE_BY_LABEL[label] for label in PLACEHOLDER.findall(text)) if counts is not None else Counter()
                     if text:
                         messages.append(({"role": payload["role"], "text": text}, hits))
@@ -133,7 +131,6 @@ def main(argv=None):
     if args.no_redact:
         outgoing, summary["redaction"] = records, {"policy": "disabled", "counts": {}}
     elif args.send:
-        # Redact the outgoing copy again: older or hand-edited samples may predate redaction.
         outgoing, summary["redaction"] = redact_records(records)
     else:
         outgoing, summary["redaction"] = records, {"policy": REDACTION_POLICY, "counts": dict(sorted(prepared.items()))}

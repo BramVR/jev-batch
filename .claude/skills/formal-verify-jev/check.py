@@ -32,8 +32,8 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "bb5f33fd4bb37587b1e8412fd323d68be2e29bf6",
-    "scripts/demo_sessions.py": "c000e4f2cea676758843663921a9130ad1dc435f",
+    "jev.py": "86ab26471feed548b54d75ec07457782bd27a503",
+    "scripts/demo_sessions.py": "85993fe7c2e4d7f521fd2e2e5f3d7382f5a1fb1b",
 }
 KEY = "sentinel-key-not-real"
 SECRET_BODY = "SECRET-BODY-must-not-leak"
@@ -1849,7 +1849,7 @@ MUTANTS = [
     ("chunked path ignores the cache", "chunk-cache-reuse",
      [("respond(None, request, timeout, retries, stop, cache,", "respond(None, request, timeout, retries, stop, None,")]),
     ("caller check runs after caching", "chunk-cache-resume",
-     [("    if check:\n        # A caller-level rejection must never be cached, or every rerun replays it without asking again.\n"
+     [("    if check:\n"
        "        check(result)\n    if cache:\n        cache.store(entry, result)\n",
        "    if cache:\n        cache.store(entry, result)\n    if check:\n        check(result)\n")]),
     ("chunk requests skip retries", "chunk-retry-resends-only-that-chunk",

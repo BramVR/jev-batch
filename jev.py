@@ -137,7 +137,6 @@ class Cache:
                     os.unlink(temp)
                 raise
         except OSError:
-            # The request already succeeded and may be billed; keep its result.
             print("jev: warning: could not write cache entry", file=sys.stderr)
 
 
@@ -289,7 +288,6 @@ def send(request, timeout):
         try:
             status = exc.code
             retry_after = retry_after_seconds((exc.headers or {}).get("Retry-After"))
-            # Only the exact upstream phrase counts; the body itself is never surfaced.
             unavailable = status not in (401, 403, 422) and ENDPOINT_UNAVAILABLE in (exc.read(ERROR_BODY_LIMIT) or b"")
         except (OSError, ValueError):
             unavailable = False
@@ -327,7 +325,6 @@ def post(request, timeout, retries, stop):
 
 
 def respond(record_id, request, timeout, retries, stop, cache=None, check=None):
-    # Only validated responses are stored, after retries; a hit sends nothing and never retries.
     entry = cache.path(request.full_url, request.data) if cache else None
     result = cache.load(entry) if entry else None
     if result is not None:
@@ -340,7 +337,6 @@ def respond(record_id, request, timeout, retries, stop, cache=None, check=None):
     if "id" in result:
         raise JevError("System One response id collides with record id")
     if check:
-        # A caller-level rejection must never be cached, or every rerun replays it without asking again.
         check(result)
     if cache:
         cache.store(entry, result)
@@ -403,10 +399,8 @@ def choice_probabilities(question, answer):
 
 def mean_choice(question, chunk_probabilities):
     labels = list(question["criteria"])
-    # Exact means: rounding a sum before dividing can flip the winner between near-equal labels.
     exact = {label: sum(map(Fraction, (p[label] for p in chunk_probabilities))) / len(chunk_probabilities)
              for label in labels}
-    # max() keeps the first maximal label, so ties go to criteria order.
     choice = max(labels, key=exact.__getitem__)
     total = {label: float(mean) for label, mean in exact.items()}
     return {"type": "choice", "choice": choice, "confidence": total[choice], "probabilities": total}
@@ -455,7 +449,6 @@ def emit(result):
 
 
 def batch(questions, key, backend, timeout, retries, concurrency, cache=None, chunk_tokens=None):
-    """Keep at most `concurrency` lines in flight and emit results strictly in input order."""
     stop = threading.Event()
     window = deque()
     lines = iter(sys.stdin)
