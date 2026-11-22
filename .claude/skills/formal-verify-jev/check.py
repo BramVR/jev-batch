@@ -32,7 +32,7 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "7c10d7fca5d711868ebeeab43d5f3ea4e6676be0",
+    "jev.py": "bbe1404f0776108a8b1ec716f6c395f8800aff85",
     "scripts/demo_sessions.py": "aefdd89b19f0dc1fb55430cdf2227387b93c7bab",
 }
 KEY = "sentinel-key-not-real"
@@ -756,9 +756,9 @@ def check_summarize(c, depth):
         seeded = mode != "plain"
         c.cases += 1
         lines = [summary_line(kind, i) for i, kind in enumerate(seq)]
-        argv = ["summarize", "--base-url", "https://api.typesafe.ai/v1"] + ([] if mode == "inferred" else ["--question", "q"])
+        argv = ["summarize"] + ([] if mode == "inferred" else ["--question", "q"])
         run = drive(c.jev, argv + (["--questions", files[mode]] if seeded else []),
-                    "".join(line + "\n" for line in lines), {"TYPESAFE_API_KEY": KEY})
+                    "".join(line + "\n" for line in lines), {"TYPESAFE_API_KEY": KEY, "JEV_BASE_URL": "https://api.typesafe.ai/v1"})
         case = f"summarize {mode} " + ",".join(seq)
         if not c.clean_exit("summarize-clean-exit", case, run):
             continue
@@ -813,22 +813,6 @@ def check_summarize(c, depth):
         for prop, ok in checks.items():
             if not ok:
                 c.fail(prop, case, f"exit {run.code} stdout {run.stdout[:300]!r} stderr {run.stderr[:120]!r}")
-
-    results = c.tmp / "summarize-flags.jsonl"
-    results.write_text(summary_line("a:1", 0) + "\n", encoding="utf-8")
-    for flag, expected in ((["--cache", str(c.tmp / "summarize-cache")], "jev: summarize sends no requests; --cache is for classify and batch\n"),
-                           (["--dry-run"], "jev: summarize sends no requests; --dry-run is for classify and batch\n"),
-                           (["--labels", str(results)], "jev: --labels is for eval; --question is for eval and summarize\n"),
-                           (["--retries", "1"], "jev: summarize sends no requests; --retries and --concurrency are for classify and batch\n"),
-                           (["--concurrency", "2"], "jev: summarize sends no requests; --retries and --concurrency are for classify and batch\n")):
-        c.cases += 1
-        run = drive(c.jev, ["summarize", "--input", str(results), *flag], "", {"TYPESAFE_API_KEY": KEY})
-        case = f"summarize {flag[0]}"
-        if not c.clean_exit("summarize-clean-exit", case, run):
-            continue
-        if (run.code, run.stdout, run.stderr) != (1, "", expected) or run.requests or run.key_reads \
-                or (c.tmp / "summarize-cache").exists():
-            c.fail("summarize-flag-errors", case, f"exit {run.code} stdout {run.stdout[:80]!r} stderr {run.stderr!r}")
 
 
 # P5. Demo redaction: no planted value survives, structure and IDs stay, a second pass is a no-op,
@@ -1354,12 +1338,6 @@ EVAL_ERRORS = [
     (['{"id":"x","label":"a"}'], [], (), "jev: eval needs --question naming a Choice question"),
     (['{"id":"x","label":"a"}'], [], ("--question", "n"), "jev: eval needs --question naming a Choice question"),
     (['{"id":"x","label":"a"}'], [], ("--question", "zz"), "jev: eval needs --question naming a Choice question"),
-    (['{"id":"x","label":"a"}'], [], ("--question", "r", "--cache", "eval-cache-never-created"),
-     "jev: eval sends no requests; --cache is for classify and batch"),
-    (['{"id":"x","label":"a"}'], [], ("--question", "r", "--dry-run"),
-     "jev: eval sends no requests; --dry-run is for classify and batch"),
-    (['{"id":"x","label":"a"}'], [], ("--question", "r", "--retries", "0"), "jev: eval sends no requests; --retries and --concurrency are for classify and batch"),
-    (['{"id":"x","label":"a"}'], [], ("--question", "r", "--concurrency", "1"), "jev: eval sends no requests; --retries and --concurrency are for classify and batch"),
 ]
 
 
@@ -1648,12 +1626,6 @@ def check_chunk_guards(c):
             continue
         if run.code not in (1, 2) or run.stdout or run.requests:
             c.fail("chunk-guards", case, f"exit {run.code} stdout {run.stdout!r} {len(run.requests)} requests")
-    for argv in (["summarize", "--chunk-tokens", "30000"],
-                 ["eval", "--questions", c.questions_file(CHOICE_AB), "--labels", c.questions_file(CHOICE_AB), "--chunk-tokens", "30000"]):
-        c.cases += 1
-        run = drive(c.jev, argv, "", respond=lambda i, r: reply)
-        if run.code != 1 or run.requests or "--chunk-tokens is for classify and batch" not in run.stderr:
-            c.fail("chunk-guards", f"chunk-guard offline {argv[0]}", f"exit {run.code} stderr {run.stderr!r}")
 
 
 def check_chunk(c, depth):
@@ -1752,8 +1724,7 @@ MUTANTS = [
     ("cache never read", "cache-resume-sends-only-missing",
      [("result = cache.load(entry) if entry else None", "result = None")]),
     ("eval reads credentials", "eval-offline",
-     [('        if args.command == "eval":\n            if not args.labels:',
-       '        if args.command == "eval":\n            api_key()\n            if not args.labels:')]),
+     [("def run_eval(args):\n", "def run_eval(args):\n    api_key()\n")]),
     ("calibration bins high-inclusive", "eval-report",
      [("bins[bisect_right(CALIBRATION_EDGES, confidence)]", "bins[bisect_left(CALIBRATION_EDGES, confidence)]"),
       ("from bisect import bisect_right", "from bisect import bisect_left")]),
@@ -1767,20 +1738,17 @@ MUTANTS = [
     ("duplicate prediction ids accepted", "eval-errors",
      [('        if id_key(record["id"]) in predictions:', '        if False:')]),
     ("eval rereads the raw questions file", "questions-eval-same-loader",
-     [('        if args.command == "eval":\n            if not args.labels:',
-       '        if args.command == "eval":\n            questions = read_json(args.questions.read_text(encoding="utf-8"))\n'
-       '            if not args.labels:')]),
-    ("eval accepts --cache and ignores it", "eval-errors",
-     [('        if offline and args.cache:\n', '        if False:\n')]),
+     [("def run_eval(args):\n    questions = load_questions(args.questions)\n",
+       'def run_eval(args):\n    questions = read_json(args.questions.read_text(encoding="utf-8"))\n')]),
     ("eval writes the labels file", "eval-inputs-unchanged",
-     [('            with args.labels.open(encoding="utf-8") as labels:',
-       '            args.labels.write_text(args.labels.read_text(encoding="utf-8") + " ", encoding="utf-8")\n'
-       '            with args.labels.open(encoding="utf-8") as labels:')]),
+     [('    with args.labels.open(encoding="utf-8") as labels:',
+       '    args.labels.write_text(args.labels.read_text(encoding="utf-8") + " ", encoding="utf-8")\n'
+       '    with args.labels.open(encoding="utf-8") as labels:')]),
     ("dry run reads credentials", "dry-run-no-network-no-credentials",
      [("api_key() if backend.typesafe and not args.dry_run else None", "api_key() if backend.typesafe else None")]),
     ("dry run also sends", "dry-run-no-network-no-credentials",
-     [('                emit(dry_run_report([estimator(read_json(raw))], backend))',
-       "                emit(dry_run_report([[classify(read_json(raw), questions, key, backend, args.timeout), "
+     [('            emit(dry_run_report([estimator(read_json(raw))], backend))',
+       "            emit(dry_run_report([[classify(read_json(raw), questions, key, backend, args.timeout), "
        "estimator(read_json(raw))][1]], backend))")]),
     ("dry run skips record validation", "dry-run-validates-like-send",
      [("    payload = request_payload(record, questions, backend)\n    text = ",
@@ -1796,11 +1764,9 @@ MUTANTS = [
      [('"question_tokens_estimate": estimate_tokens(questions)',
        '"question_tokens_estimate": estimate_tokens({"schema_version": 1, "questions": questions})')]),
     ("dry run writes the cache", "dry-run-ignores-cache",
-     [('                emit(dry_run_report([estimator(read_json(raw))], backend))',
-       "                cache and cache.store(cache.path(backend.endpoint, request_body(request_payload(read_json(raw), questions, backend))), {\"answers\": {}})\n"
-       + '                emit(dry_run_report([estimator(read_json(raw))], backend))')]),
-    ("eval accepts --dry-run and ignores it", "eval-errors",
-     [('        if offline and args.dry_run:\n', '        if False:\n')]),
+     [('            emit(dry_run_report([estimator(read_json(raw))], backend))',
+       "            cache and cache.store(cache.path(backend.endpoint, request_body(request_payload(read_json(raw), questions, backend))), {\"answers\": {}})\n"
+       + '            emit(dry_run_report([estimator(read_json(raw))], backend))')]),
     ("dry run total drops a batch row", "dry-run-total-is-sum",
      [('total = sum(row["input_tokens_estimate"] for row in rows)',
        'total = sum(row["input_tokens_estimate"] for row in rows[1:]) or rows[0]["input_tokens_estimate"]')]),
@@ -1816,12 +1782,12 @@ MUTANTS = [
     ("summarize parses --questions without load_questions", "summarize-counts",
      [("        questions = load_questions(args.questions)\n        if question is None",
        "        questions = read_json(args.questions.read_text(encoding=\"utf-8\"))\n        if question is None")]),
-    ("summarize treated as a sending command", "summarize-flag-errors",
-     [('offline = args.command in ("eval", "summarize")', 'offline = args.command == "eval"')]),
-    ("offline commands accept --retries and --concurrency", "summarize-flag-errors",
-     [("if offline and (args.retries is not None or args.concurrency is not None):", "if False:")]),
     ("summarize reads credentials", "summarize-offline",
-     [("            return run_summarize(args)", "            api_key()\n            return run_summarize(args)")]),
+     [("def run_summarize(args):\n", "def run_summarize(args):\n    api_key()\n")]),
+    ("flag abbreviations allowed", "flags-scoped",
+     [('commands.add_parser("classify", allow_abbrev=False, ', 'commands.add_parser("classify", ')]),
+    ("offline command declares a sending flag", "flags-scoped",
+     [('    eval_.add_argument("--question", ', '    eval_.add_argument("--cache", type=Path)\n    eval_.add_argument("--question", ')]),
     ("chunk split counts characters, not bytes", "chunk-bounded",
      [('        width = len(char.encode("utf-8"))', '        width = 1')]),
     ("chunks overlap by one character", "chunk-cover",
@@ -1859,8 +1825,6 @@ MUTANTS = [
      [("for start, end in spans]", "for start, end in spans[:1]]")]),
     ("non-choice questions accepted for chunking", "chunk-guards",
      [('    if any(q["type"] != "choice" or', '    if False and any(q["type"] != "choice" or')]),
-    ("offline commands accept --chunk-tokens", "chunk-guards",
-     [("        if offline and args.chunk_tokens is not None:\n", "        if False:\n")]),
 ]
 
 # Broken variants of scripts/demo_sessions.py, checked the same way.
@@ -1901,11 +1865,34 @@ DEMO_MUTANTS = [
 KNOWN_FINDINGS = {}
 
 
+def check_flag_scope(c):
+    """Derived from jev's own parser: a flag some command declares is a usage error on every command that lacks it,
+    and the offline commands declare none of the flags shared by classify and batch except --questions."""
+    commands = next(a for a in c.jev.build_parser()._actions if isinstance(a, argparse._SubParsersAction)).choices
+    declared = {name: {flag for action in sub._actions for flag in action.option_strings} for name, sub in commands.items()}
+    required = {name: [arg for action in sub._actions if action.required for arg in (action.option_strings[0], "x")]
+                for name, sub in commands.items()}
+    sending = (declared["classify"] & declared["batch"]) - {"-h", "--help", "--questions"}
+    for name in ("eval", "summarize"):
+        c.cases += 1
+        if declared[name] & sending:
+            c.fail("flags-scoped", f"flags {name} declares", f"sending-only flags {sorted(declared[name] & sending)}")
+    every = set().union(*declared.values())
+    target = c.tmp / "flag-scope-target"
+    for name, flags in declared.items():
+        for flag in sorted(every - flags):
+            c.cases += 1
+            run = drive(c.jev, [name, *required[name], flag, str(target)], "", {"TYPESAFE_API_KEY": KEY})
+            if run.code != 2 or run.stdout or f"unrecognized arguments: {flag}" not in run.stderr \
+                    or run.requests or run.key_reads or target.exists():
+                c.fail("flags-scoped", f"flags {name} {flag}", f"exit {run.code} stderr {run.stderr[-120:]!r}")
+
+
 def run_all(jev, demo, depth, only=None):
     with tempfile.TemporaryDirectory() as tmp:
         c = Checker(jev, tmp, demo)
         for name, fn in (("batch", lambda: check_batch(c, depth)), ("schedules", lambda: check_schedules(c)),
-                         ("retry", lambda: check_retry_policy(c)), ("requests", lambda: check_requests(c)),
+                         ("retry", lambda: check_retry_policy(c)), ("requests", lambda: (check_requests(c), check_flag_scope(c))),
                          ("numbers", lambda: check_numbers(c)), ("questions", lambda: check_question_files(c)),
                          ("redaction", lambda: (check_redaction(c), check_redact_before_cap(c), check_demo_send(c))),
                          ("cache", lambda: check_cache(c, min(depth, 2))),

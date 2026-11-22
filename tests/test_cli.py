@@ -1,3 +1,4 @@
+import argparse
 import contextlib
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -252,11 +253,6 @@ class CliTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exit_:
             jev.main(["batch", "--questions", "q.json", "--concurrency", "two"])
         self.assertEqual(exit_.exception.code, 2)
-        for command in ("eval", "summarize"):
-            for extra in (["--retries", "1"], ["--concurrency", "2"]):
-                code, out, err, sent = self.run_cli("", command, extra=extra)
-                self.assertEqual((code, out, sent), (1, "", []))
-                self.assertIn(f"{command} sends no requests; --retries and --concurrency are for classify and batch", err)
         code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}\n', extra=["--dry-run", "--concurrency", "2", "--retries", "0"])
         self.assertEqual((code, err, sent), (0, "", []))
         self.assertTrue(json.loads(out)["dry_run"])
@@ -504,8 +500,8 @@ class CliTests(unittest.TestCase):
         out = io.StringIO()
         with patch("jev.api_key") as key, patch("subprocess.run") as keychain, \
              patch("urllib.request.urlopen") as http, patch("sys.stdin", io.StringIO(line + "\n")), \
-             contextlib.redirect_stdout(out):
-            self.assertEqual(jev.main(["summarize", "--base-url", "https://api.typesafe.ai/v1"]), 0)
+             patch.dict(os.environ, {"JEV_BASE_URL": "https://api.typesafe.ai/v1"}), contextlib.redirect_stdout(out):
+            self.assertEqual(jev.main(["summarize"]), 0)
         key.assert_not_called()
         keychain.assert_not_called()
         http.assert_not_called()
@@ -523,7 +519,25 @@ class CliTests(unittest.TestCase):
             run = subprocess.run([sys.executable, str(ROOT / "jev.py"), command], capture_output=True, text=True,
                                  stdin=subprocess.DEVNULL)
             self.assertEqual(run.returncode, 2)
-            self.assertIn("--questions is required", run.stderr)
+            self.assertIn("the following arguments are required: --questions", run.stderr)
+
+    def test_each_command_rejects_flags_it_does_not_declare(self):
+        # Derived from the parser itself: a flag any command declares is a usage error on every command that does not.
+        commands = next(a for a in jev.build_parser()._actions if isinstance(a, argparse._SubParsersAction)).choices
+        declared = {name: {flag for action in sub._actions for flag in action.option_strings}
+                    for name, sub in commands.items()}
+        required = {name: [arg for action in sub._actions if action.required for arg in (action.option_strings[0], "x")]
+                    for name, sub in commands.items()}
+        every = set().union(*declared.values())
+        self.assertIn("--concurrency", every - declared["classify"])
+        for name, flags in declared.items():
+            for flag in sorted(every - flags):
+                with patch("sys.stdin", io.StringIO("")), patch("urllib.request.urlopen", side_effect=AssertionError), \
+                     patch("jev.api_key", side_effect=AssertionError), contextlib.redirect_stderr(io.StringIO()) as err, \
+                     self.assertRaises(SystemExit) as exit_:
+                    jev.main([name, *required[name], flag, "1"])
+                self.assertEqual(exit_.exception.code, 2, (name, flag))
+                self.assertIn(f"unrecognized arguments: {flag}", err.getvalue(), (name, flag))
 
     def test_cache_second_run_sends_nothing_and_reattaches_current_ids(self):
         with tempfile.TemporaryDirectory() as cache:
@@ -723,9 +737,11 @@ class CliTests(unittest.TestCase):
         self.assertNotEqual(Decimal(report["estimated_cost_usd"]), 0)
 
     def test_help_as_process(self):
-        result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "--help"], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "--help"], capture_output=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0)
         self.assertIn("batch", result.stdout)
+        result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "batch", "--help"], capture_output=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0)
         self.assertIn("sends nothing and reads no credentials", " ".join(result.stdout.split()))
 
 

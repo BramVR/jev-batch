@@ -133,19 +133,15 @@ class EvalTests(unittest.TestCase):
                                         questions={"route": QUESTIONS["route"]}, extra=())
         self.assertEqual((code, report["question"]), (0, "route"))
 
-    def test_eval_flags_are_eval_only(self):
+    def test_eval_requires_labels(self):
         with tempfile.TemporaryDirectory() as tmp:
             qpath = Path(tmp) / "q.json"
-            qpath.write_text(json.dumps(QUESTIONS))
-            for argv in (["batch", "--labels", "x"], ["classify", "--question", "route"],
-                         ["eval"], ["eval", "--labels", "x", "--input", "y"],
-                         ["eval", "--labels", "x", "--cache", str(Path(tmp) / "cache")],
-                         ["eval", "--labels", "x", "--dry-run"]):
-                err = io.StringIO()
-                with contextlib.redirect_stderr(err), patch("urllib.request.urlopen", side_effect=AssertionError):
-                    self.assertEqual(jev.main([*argv, "--questions", str(qpath)]), 1, argv)
-                self.assertTrue(err.getvalue().startswith("jev: "), argv)
-            self.assertFalse((Path(tmp) / "cache").exists())
+            qpath.write_text(json.dumps(QUESTIONS), encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as exit_:
+                jev.main(["eval", "--questions", str(qpath)])
+            self.assertEqual(exit_.exception.code, 2)
+            self.assertIn("the following arguments are required: --labels", err.getvalue())
 
 
 if __name__ == "__main__":

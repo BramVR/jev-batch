@@ -34,13 +34,15 @@ Batch JSONL from stdin, one independent POST per line:
 python3 jev.py batch --questions examples/failure-patterns.json < records.jsonl > results.jsonl
 ```
 
+Flags follow the command, and each command accepts only its own: `python3 jev.py <command> --help` lists them. A flag the command does not take, such as `--cache` on `eval` or `--concurrency` on `classify`, exits 2 as a usage error before anything is read or sent. Flags are never abbreviated.
+
 Each input is an object with `id` and `state`. IDs are any JSON value and pass through unchanged. State accepts a string, object, or array. Optional `assets` passes through the documented base64 image asset mapping. Other extra record fields are ignored. Blank lines are errors.
 
 Each output is `{ "id": <input id>, ...<full API response> }`. It includes `model`, `answers`, `usage`, all probabilities, confidence, and future response fields. No rounding or thresholding. Output order follows input order. Duplicate IDs remain duplicates.
 
 Each request gets `--timeout 60` seconds. Batch keeps up to `--concurrency` requests in flight (default 1, max 32) and still writes results strictly in input order. It buffers at most that many finished results while it waits for an earlier line.
 
-Each request is retried up to `--retries` times (default 3, max 10) after HTTP 429, any HTTP 5xx, a connection error or timeout, or an error response whose body contains exactly `Endpoint is unavailable`. That phrase makes any status retryable except HTTP 401, 403, and 422, so a 400 or 404 carrying it is retried, and the same status without it is not. HTTP 401, 403, and 422 are never retried, whatever the body says. Other 4xx statuses without the phrase, invalid records, and invalid responses are not retried either. The CLI reads at most 4 KiB of an error body to look for the phrase and never prints it. The wait is capped exponential backoff with full jitter, starting at 0.5 seconds and capped at 30. A `Retry-After` header in seconds or as an HTTP date replaces the backoff for that wait, up to the same 30-second cap. Out-of-range `--retries` or `--concurrency` exits 1 before any request is sent. `eval` and `summarize` send nothing and reject both flags; `--dry-run` ignores them. `classify` uses the same retry policy.
+Each request is retried up to `--retries` times (default 3, max 10) after HTTP 429, any HTTP 5xx, a connection error or timeout, or an error response whose body contains exactly `Endpoint is unavailable`. That phrase makes any status retryable except HTTP 401, 403, and 422, so a 400 or 404 carrying it is retried, and the same status without it is not. HTTP 401, 403, and 422 are never retried, whatever the body says. Other 4xx statuses without the phrase, invalid records, and invalid responses are not retried either. The CLI reads at most 4 KiB of an error body to look for the phrase and never prints it. The wait is capped exponential backoff with full jitter, starting at 0.5 seconds and capped at 30. A `Retry-After` header in seconds or as an HTTP date replaces the backoff for that wait, up to the same 30-second cap. Out-of-range `--retries` or `--concurrency` exits 1 before any request is sent; `--dry-run` ignores in-range values. `classify` uses the same retry policy.
 
 On the first invalid record or exhausted API failure, exit 1; previous successful JSONL lines remain valid and flushed. Stderr names the first line without output, for example `jev: batch stopped at line 2; System One HTTP 503; gave up after 4 attempts`. It never includes HTTP bodies. `invalid JSON record` means the input line itself failed to parse, while a response that is not UTF-8 JSON with finite numbers reads `System One returned invalid JSON`. An invalid line is never sent, and nothing after it is read. With concurrency above 1, requests for up to `--concurrency - 1` later lines may already be running when an earlier line fails. Those requests finish or time out, pending retries stop, and their results are discarded, so resuming from the reported line sends them again, unless `--cache` is on and they already stored an entry.
 
@@ -127,7 +129,7 @@ The first slice supports only Choice questions with `criteria` objects and strin
 
 With `--cache`, each chunk request is cached on its own, keyed like any other request. A rerun after a failed chunk sends only the chunks that never succeeded, and an identical rerun sends nothing. Identical chunk text within a record hits the same entry. A chunk answer rejected for its labels is never cached, so the rerun asks again.
 
-`--dry-run --chunk-tokens N` prices the chunked requests: a row for a chunked record carries `chunks` and the sums of its chunk requests' bytes and token estimates, so question tokens count once per chunk. Records that fit keep the plain row. `eval` and `summarize` reject `--chunk-tokens`. `summarize` reads chunked output unchanged, because each record's aggregated `answers` keep the Choice shape.
+`--dry-run --chunk-tokens N` prices the chunked requests: a row for a chunked record carries `chunks` and the sums of its chunk requests' bytes and token estimates, so question tokens count once per chunk. Records that fit keep the plain row. `summarize` reads chunked output unchanged, because each record's aggregated `answers` keep the Choice shape.
 
 ## Summarize results
 
@@ -146,7 +148,7 @@ The output is one JSON object:
 - `confidence.bins` holds ten fixed bins, `0.0-0.1` through `0.9-1.0`. Each includes its lower edge and excludes its upper edge, except `0.9-1.0`, which includes 1. A confidence of 0 lands in `0.0-0.1`. These are the same edges as `eval`'s calibration buckets.
 - `missing` counts answers with no `confidence`. A non-numeric or boolean value counts as `malformed`. A number below 0 or above 1 counts as `out_of_range`. Each malformed or out-of-range value gets a line-numbered entry in `diagnostics`, also printed to stderr, and the exit stays 0.
 
-Summarize sends no requests, so `--cache`, `--dry-run`, and `--labels` exit 1 instead of being ignored. Empty input with a selected question prints `records: 0`, zero counts for any seeded labels, and zero bins. Invalid JSON, a line without `id` and an `answers` object, or a selected answer that is not a Choice stops with exit 1 and the line number, printing no summary. The summary never rewrites results, so full probability maps stay in the saved JSONL. Score, Noul, and Box answers are not summarized: Score levels and Noul probabilities have no label to count, and Box answers hold coordinates. Read those from the saved results with your own code.
+Empty input with a selected question prints `records: 0`, zero counts for any seeded labels, and zero bins. Invalid JSON, a line without `id` and an `answers` object, or a selected answer that is not a Choice stops with exit 1 and the line number, printing no summary. The summary never rewrites results, so full probability maps stay in the saved JSONL. Score, Noul, and Box answers are not summarized: Score levels and Noul probabilities have no label to count, and Box answers hold coordinates. Read those from the saved results with your own code.
 
 ## Question contracts
 
@@ -184,7 +186,7 @@ Output is one JSON object:
 
 Read calibration bucket by bucket. When `accuracy` sits near `mean_confidence`, the stated confidence matches observed correctness. Accuracy below mean confidence means overconfidence. Small counts make a bucket noise; compare buckets only with enough labeled examples.
 
-Duplicate IDs in either file, a label outside the criteria keys, an empty labels file, malformed or blank lines, and a missing `--labels` exit 1 with no report. Errors name the file and line. Empty predictions report zero scored rows. Eval sends no requests, so `--cache` and `--dry-run` are rejected with eval.
+Duplicate IDs in either file, a label outside the criteria keys, an empty labels file, and malformed or blank lines exit 1 with no report. Errors name the file and line. Empty predictions report zero scored rows.
 
 ## Run the session demo
 
@@ -229,6 +231,7 @@ The agent workflow lives in [SKILL.md](SKILL.md). Local demo status lives in [do
 python3 -m unittest discover -s tests -v
 python3 -m compileall -q jev.py scripts tests
 python3 jev.py --help
+python3 jev.py batch --help
 git diff --check
 ```
 

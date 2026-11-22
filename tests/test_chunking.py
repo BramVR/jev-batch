@@ -129,23 +129,13 @@ class ChunkingTests(unittest.TestCase):
         self.assertEqual((code, err, len(sent)), (0, "", 8))
         self.assertEqual([json.loads(line)["id"] for line in out.splitlines()], [0, 1, 2, 3])
 
-    def test_dry_run_estimates_every_chunk_and_offline_commands_reject_the_flag(self):
+    def test_dry_run_estimates_every_chunk(self):
         code, out, err, sent = self.run_cli(json.dumps({"id": 1, "state": "x" * 25}), [], extra=["--dry-run"])
         self.assertEqual((code, err, sent), (0, "", []))
         row = json.loads(out)["records"][0]
         single = jev.estimate({"id": None, "state": "x" * 10}, QUESTIONS, jev.Backend(jev.DEFAULT_BASE_URL, jev.DEFAULT_MODEL))
         self.assertEqual(row["chunks"], 3)
         self.assertEqual(row["question_tokens_estimate"], 3 * single["question_tokens_estimate"])
-        for command in ("eval", "summarize"):
-            err = io.StringIO()
-            with tempfile.TemporaryDirectory() as tmp:
-                path = Path(tmp) / "q.json"
-                path.write_text(json.dumps(QUESTIONS), encoding="utf-8")
-                with patch("sys.stdin", io.StringIO("")), contextlib.redirect_stderr(err):
-                    code = jev.main([command, "--questions", str(path), "--labels", str(path), "--chunk-tokens", "30000"]
-                                    if command == "eval" else [command, "--chunk-tokens", "30000"])
-            self.assertEqual(code, 1)
-            self.assertIn(f"{command} sends no requests; --chunk-tokens is for classify and batch", err.getvalue())
 
     def test_bad_chunk_answer_stops_before_next_chunk(self):
         bad = answer(0.75, 0.25)

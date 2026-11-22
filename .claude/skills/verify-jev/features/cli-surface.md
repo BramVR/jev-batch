@@ -4,17 +4,17 @@ A user gets help, clear usage errors, and local rejection of bad flags or questi
 
 ## Sub-features
 
-- `help` prints usage naming `classify`, `batch`, `summarize`, `--questions`, `--question`, and `--dry-run`, exit 0.
+- `help` top-level `--help` names all four commands; `batch --help` lists `--questions`, `--dry-run`, and `--concurrency` but not `--labels`; `summarize --help` lists `--question` but not `--retries`.
 - `help-retry-rule` the `--retries` help names every retry case: 429, 5xx, connection errors, timeouts, and the `Endpoint is unavailable` body on statuses other than 401/403/422. Keep it in step with README when the policy changes.
-- `usage-error` `classify`, `batch`, or `eval` without `--questions` exits 2 from argparse.
+- `usage-error` `classify`, `batch`, or `eval` without `--questions`, or `eval` without `--labels`, exits 2 from argparse.
+- `flag-scope` each command declares only its own flags, so a flag on the wrong command exits 2 with `unrecognized arguments` and sends nothing: `--input` on `batch` or `eval`, `--concurrency` on `classify` or `summarize`, `--retries` on `eval`.
 - `timeout-guard` nonfinite or nonpositive `--timeout` exits 1.
-- `batch-input-guard` `batch --input` and `eval --input` exit 1; both read stdin only.
 - `questions-guard` empty mapping or unknown question type exits 1, with or without `--dry-run`. Version and wrapper rules live in [question-files](./question-files.md).
-- `retry-concurrency-guard` `--concurrency` outside 1..32 or `--retries` outside 0..10 exits 1 with no request sent; a non-integer value exits 2 from argparse. `eval` and `summarize` send nothing, so they reject either flag with exit 1, as they reject `--cache`, `--dry-run`, and `--chunk-tokens`. `--labels` outside `eval` and `--question` outside `eval` and `summarize` also exit 1. `--dry-run` accepts in-range values and ignores them; out-of-range values still exit 1. Base URL rules are in [Backend selection](./backend-select.md).
+- `retry-concurrency-guard` `--concurrency` outside 1..32 or `--retries` outside 0..10 exits 1 with no request sent; a non-integer value exits 2 from argparse. `--dry-run` accepts in-range values and ignores them; out-of-range values still exit 1. Base URL rules are in [Backend selection](./backend-select.md).
 
 ## How to get to it (user POV)
 
-- `python3 jev.py --help`
+- `python3 jev.py --help`, `python3 jev.py batch --help`
 - `python3 jev.py classify|batch|eval --questions <file> [flags]`
 
 ## Driving it with verify.py
@@ -28,5 +28,5 @@ Preconditions:
 
 ## Gotchas
 
-- Argparse errors exit 2; every other failure exits 1. Do not collapse them in assertions.
+- Argparse errors, including a flag the command does not declare, exit 2; every other failure exits 1. Do not collapse them in assertions.
 - Question validation happens before backend checks. A bad question file never reaches a request.

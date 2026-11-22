@@ -644,109 +644,117 @@ def summarize(lines, question=None, questions=None):
             "confidence": confidence, "diagnostics": diagnostics}
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["classify", "batch", "eval", "summarize"])
-    parser.add_argument("--questions", type=Path, help=f"JSON questions file: raw API mapping or {{schema_version: {'|'.join(map(str, SCHEMA_VERSIONS))}, questions}}; summarize uses it only for label order")
-    parser.add_argument("--base-url", default=os.environ.get("JEV_BASE_URL", DEFAULT_BASE_URL))
-    parser.add_argument("--model", default=os.environ.get("JEV_MODEL", DEFAULT_MODEL))
-    parser.add_argument("--timeout", type=float, default=60, help="per-request seconds (default 60)")
-    parser.add_argument("--input", type=Path, help="classify: one {id,state} JSON record; summarize: results JSONL; default stdin")
-    parser.add_argument("--cache", type=Path, metavar="DIR", help="classify/batch: reuse and store successful responses in DIR; off by default")
-    parser.add_argument("--labels", type=Path, help="eval: hand-labeled {id,label} JSONL file")
-    parser.add_argument("--question", help="eval, summarize: Choice question name; default the only question")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="validate, then print estimated input tokens and cost as one JSON object; "
-                             "sends nothing and reads no credentials")
-    parser.add_argument("--retries", type=int,
-                        help=f"classify/batch: retries per request after HTTP 429 or 5xx, a connection error or timeout, or an "
-                             f"'Endpoint is unavailable' error body on a status other than 401/403/422 (default {DEFAULT_RETRIES}, max {MAX_RETRIES})")
-    parser.add_argument("--chunk-tokens", type=int, metavar="N",
-                        help=f"classify/batch: split string state so each request stays within N estimated tokens "
-                             f"(max {QUESTION_TOKEN_LIMIT}); choice questions only")
-    parser.add_argument("--concurrency", type=int,
-                        help=f"batch: requests in flight (default 1, max {MAX_CONCURRENCY})")
-    args = parser.parse_args(argv)
-    if args.command != "summarize" and args.questions is None:
-        parser.error("--questions is required for classify, batch, and eval")
-    offline = args.command in ("eval", "summarize")
-    try:
-        if not math.isfinite(args.timeout) or args.timeout <= 0:
-            raise JevError("timeout must be positive and finite")
-        if args.retries is not None and not 0 <= args.retries <= MAX_RETRIES:
-            raise JevError(f"retries must be between 0 and {MAX_RETRIES}")
-        if args.concurrency is not None and not 1 <= args.concurrency <= MAX_CONCURRENCY:
-            raise JevError(f"concurrency must be between 1 and {MAX_CONCURRENCY}")
-        if args.command not in ("classify", "summarize") and args.input:
-            raise JevError(f"{args.command} reads JSONL from stdin; --input is for classify and summarize")
-        if (args.labels and args.command != "eval") or (args.question is not None and not offline):
-            raise JevError("--labels is for eval; --question is for eval and summarize")
-        if offline and args.cache:
-            raise JevError(f"{args.command} sends no requests; --cache is for classify and batch")
-        if offline and args.dry_run:
-            raise JevError(f"{args.command} sends no requests; --dry-run is for classify and batch")
-        if offline and (args.retries is not None or args.concurrency is not None):
-            raise JevError(f"{args.command} sends no requests; --retries and --concurrency are for classify and batch")
-        if offline and args.chunk_tokens is not None:
-            raise JevError(f"{args.command} sends no requests; --chunk-tokens is for classify and batch")
-        if args.command == "summarize":
-            return run_summarize(args)
-        questions = load_questions(args.questions)
-        if args.command == "eval":
-            if not args.labels:
-                raise JevError("eval requires --labels")
-            name = args.question if args.question is not None else next(iter(questions)) if len(questions) == 1 else None
-            question = questions.get(name)
-            if not question or question["type"] != "choice" or not isinstance(question.get("criteria"), dict) or not question["criteria"]:
-                raise JevError("eval needs --question naming a Choice question with criteria options")
-            with args.labels.open(encoding="utf-8") as labels:
-                report = evaluate(name, tuple(question["criteria"]), labels, sys.stdin)
-            print(json.dumps(report, ensure_ascii=False, allow_nan=False))
-            return 0
-        if args.chunk_tokens is not None:
-            check_chunk_questions(questions, args.chunk_tokens)
-        backend = Backend(args.base_url, args.model)
-        if any(q["type"] == "box" for q in questions.values()) and not backend.supports_box:
-            raise JevError("Box and assets require a backend and model with image support; free Jev 1.13 is unsupported")
-        key = api_key() if backend.typesafe and not args.dry_run else None
-        cache = Cache(args.cache) if args.cache else None
+def build_parser():
+    """Each command declares only the flags it uses, so a flag on the wrong command is an argparse usage error.
+    allow_abbrev=False: otherwise classify would read --question as an abbreviation of --questions."""
+    questions_help = (f"JSON questions file: raw API mapping or "
+                      f"{{schema_version: {'|'.join(map(str, SCHEMA_VERSIONS))}, questions}}")
+    sending = argparse.ArgumentParser(add_help=False)
+    sending.add_argument("--questions", type=Path, required=True, help=questions_help)
+    sending.add_argument("--base-url", default=os.environ.get("JEV_BASE_URL", DEFAULT_BASE_URL))
+    sending.add_argument("--model", default=os.environ.get("JEV_MODEL", DEFAULT_MODEL))
+    sending.add_argument("--timeout", type=float, default=60, help="per-request seconds (default 60)")
+    sending.add_argument("--cache", type=Path, metavar="DIR", help="reuse and store successful responses in DIR; off by default")
+    sending.add_argument("--dry-run", action="store_true",
+                         help="validate, then print estimated input tokens and cost as one JSON object; "
+                              "sends nothing and reads no credentials")
+    sending.add_argument("--retries", type=int, default=DEFAULT_RETRIES,
+                         help=f"retries per request after HTTP 429 or 5xx, a connection error or timeout, or an "
+                              f"'Endpoint is unavailable' error body on a status other than 401/403/422 (default {DEFAULT_RETRIES}, max {MAX_RETRIES})")
+    sending.add_argument("--chunk-tokens", type=int, metavar="N",
+                         help=f"split string state so each request stays within N estimated tokens "
+                              f"(max {QUESTION_TOKEN_LIMIT}); choice questions only")
 
-        if args.dry_run:
-            def estimator(record):
-                if args.chunk_tokens is None:
-                    return estimate(record, questions, backend)
-                return estimate_chunked(record, questions, backend, args.chunk_tokens)
-            if args.command == "classify":
-                raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
-                emit(dry_run_report([estimator(read_json(raw))], backend))
-                return 0
-            rows = []
-            for number, line in enumerate(sys.stdin, 1):
-                try:
-                    rows.append({"line": number, **estimator(read_json(line))})
-                except (JevError, ValueError, UnicodeError, RecursionError) as exc:
-                    detail = str(exc) if isinstance(exc, JevError) else "invalid JSON record"
-                    print(f"jev: batch stopped at line {number}; {detail}", file=sys.stderr)
-                    return 1
-            emit(dry_run_report(rows, backend))
-            return 0
-        retries = DEFAULT_RETRIES if args.retries is None else args.retries
-        if args.command == "batch":
-            return batch(questions, key, backend, args.timeout, retries, args.concurrency or 1, cache, args.chunk_tokens)
-        raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
-        record = read_json(raw)
-        if args.chunk_tokens is None:
-            emit(classify(record, questions, key, backend, args.timeout, retries, cache=cache))
-        else:
-            spans = chunk_plan(record, questions, args.chunk_tokens)
-            emit(run_chunks(record, spans, questions, key, backend, args.timeout, args.chunk_tokens,
-                            retries, threading.Event(), cache))
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    commands = parser.add_subparsers(dest="command", required=True, metavar="{classify,batch,eval,summarize}")
+    classify_ = commands.add_parser("classify", allow_abbrev=False, parents=[sending], help="classify one {id,state} record")
+    classify_.add_argument("--input", type=Path, help="one {id,state} JSON record; default stdin")
+    classify_.set_defaults(run=run_send)
+    batch_ = commands.add_parser("batch", allow_abbrev=False, parents=[sending], help="classify {id,state} JSONL from stdin, in order")
+    batch_.add_argument("--concurrency", type=int, default=1, help=f"requests in flight (default 1, max {MAX_CONCURRENCY})")
+    batch_.set_defaults(run=run_send)
+    eval_ = commands.add_parser("eval", allow_abbrev=False, help="score saved batch results on stdin against hand labels; offline")
+    eval_.add_argument("--questions", type=Path, required=True, help=questions_help)
+    eval_.add_argument("--labels", type=Path, required=True, help="hand-labeled {id,label} JSONL file")
+    eval_.add_argument("--question", help="Choice question name; default the only question")
+    eval_.set_defaults(run=run_eval)
+    summarize_ = commands.add_parser("summarize", allow_abbrev=False, help="count Choice labels in saved results; offline")
+    summarize_.add_argument("--questions", type=Path, help=questions_help + "; used only for label order")
+    summarize_.add_argument("--input", type=Path, help="results JSONL; default stdin")
+    summarize_.add_argument("--question", help="Choice question name; default the only question")
+    summarize_.set_defaults(run=run_summarize)
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        return args.run(args)
     except JevError as exc:
         print("jev: " + str(exc), file=sys.stderr)
         return 1
     except (ValueError, OSError, UnicodeError, subprocess.SubprocessError, RecursionError):
         print("jev: could not read input or credentials", file=sys.stderr)
         return 1
+
+
+def run_send(args):
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        raise JevError("timeout must be positive and finite")
+    if not 0 <= args.retries <= MAX_RETRIES:
+        raise JevError(f"retries must be between 0 and {MAX_RETRIES}")
+    if args.command == "batch" and not 1 <= args.concurrency <= MAX_CONCURRENCY:
+        raise JevError(f"concurrency must be between 1 and {MAX_CONCURRENCY}")
+    questions = load_questions(args.questions)
+    if args.chunk_tokens is not None:
+        check_chunk_questions(questions, args.chunk_tokens)
+    backend = Backend(args.base_url, args.model)
+    if any(q["type"] == "box" for q in questions.values()) and not backend.supports_box:
+        raise JevError("Box and assets require a backend and model with image support; free Jev 1.13 is unsupported")
+    key = api_key() if backend.typesafe and not args.dry_run else None
+    cache = Cache(args.cache) if args.cache else None
+
+    if args.dry_run:
+        def estimator(record):
+            if args.chunk_tokens is None:
+                return estimate(record, questions, backend)
+            return estimate_chunked(record, questions, backend, args.chunk_tokens)
+        if args.command == "classify":
+            raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
+            emit(dry_run_report([estimator(read_json(raw))], backend))
+            return 0
+        rows = []
+        for number, line in enumerate(sys.stdin, 1):
+            try:
+                rows.append({"line": number, **estimator(read_json(line))})
+            except (JevError, ValueError, UnicodeError, RecursionError) as exc:
+                detail = str(exc) if isinstance(exc, JevError) else "invalid JSON record"
+                print(f"jev: batch stopped at line {number}; {detail}", file=sys.stderr)
+                return 1
+        emit(dry_run_report(rows, backend))
+        return 0
+    if args.command == "batch":
+        return batch(questions, key, backend, args.timeout, args.retries, args.concurrency, cache, args.chunk_tokens)
+    raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
+    record = read_json(raw)
+    if args.chunk_tokens is None:
+        emit(classify(record, questions, key, backend, args.timeout, args.retries, cache=cache))
+    else:
+        spans = chunk_plan(record, questions, args.chunk_tokens)
+        emit(run_chunks(record, spans, questions, key, backend, args.timeout, args.chunk_tokens,
+                        args.retries, threading.Event(), cache))
+    return 0
+
+
+def run_eval(args):
+    questions = load_questions(args.questions)
+    name = args.question if args.question is not None else next(iter(questions)) if len(questions) == 1 else None
+    question = questions.get(name)
+    if not question or question["type"] != "choice" or not isinstance(question.get("criteria"), dict) or not question["criteria"]:
+        raise JevError("eval needs --question naming a Choice question with criteria options")
+    with args.labels.open(encoding="utf-8") as labels:
+        report = evaluate(name, tuple(question["criteria"]), labels, sys.stdin)
+    print(json.dumps(report, ensure_ascii=False, allow_nan=False))
     return 0
 
 
