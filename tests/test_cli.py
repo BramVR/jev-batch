@@ -1,3 +1,4 @@
+import argparse
 import contextlib
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -199,7 +200,7 @@ class CliTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp, patch("random.uniform", return_value=0):
             questions = Path(tmp) / "q.json"
-            questions.write_text(json.dumps(QUESTIONS))
+            questions.write_text(json.dumps(QUESTIONS), encoding="utf-8")
             out, err = io.StringIO(), io.StringIO()
             with patch("sys.stdin", io.StringIO('{"id":1,"state":"a"}\n{"id":2,"state":"b"}\n{"id":3,"state":"c"}\n')), \
                  patch("urllib.request.urlopen", side_effect=http), \
@@ -229,7 +230,7 @@ class CliTests(unittest.TestCase):
         records = "".join(json.dumps({"id": i, "state": [i]}) + "\n" for i in range(12))
         with tempfile.TemporaryDirectory() as tmp:
             questions = Path(tmp) / "q.json"
-            questions.write_text(json.dumps(QUESTIONS))
+            questions.write_text(json.dumps(QUESTIONS), encoding="utf-8")
             for concurrency in (1, 3):
                 out = io.StringIO()
                 peak[0] = 0
@@ -252,11 +253,6 @@ class CliTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exit_:
             jev.main(["batch", "--questions", "q.json", "--concurrency", "two"])
         self.assertEqual(exit_.exception.code, 2)
-        for command in ("eval", "summarize"):
-            for extra in (["--retries", "1"], ["--concurrency", "2"]):
-                code, out, err, sent = self.run_cli("", command, extra=extra)
-                self.assertEqual((code, out, sent), (1, "", []))
-                self.assertIn(f"{command} sends no requests; --retries and --concurrency are for classify and batch", err)
         code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}\n', extra=["--dry-run", "--concurrency", "2", "--retries", "0"])
         self.assertEqual((code, err, sent), (0, "", []))
         self.assertTrue(json.loads(out)["dry_run"])
@@ -321,7 +317,7 @@ class CliTests(unittest.TestCase):
                 run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "classify", "--questions", str(path),
                                       "--base-url", base_url, "--model", "jev-1.13-free"],
                                      cwd=ROOT, env={"PATH": os.environ["PATH"], "TYPESAFE_API_KEY": "test-only"},
-                                     input='{"id":"process","state":"hello"}', capture_output=True, text=True, timeout=10)
+                                     input='{"id":"process","state":"hello"}', capture_output=True, encoding="utf-8", timeout=10)
                 self.assertEqual((run.returncode, run.stderr), (0, ""))
                 self.assertEqual(json.loads(run.stdout), {"id": "process", **RESPONSE})
                 self.assertEqual(received, [("/v1/systemone", None,
@@ -353,14 +349,14 @@ class CliTests(unittest.TestCase):
             worker.start()
             try:
                 path = Path(tmp) / "q.json"
-                path.write_text(json.dumps(QUESTIONS))
+                path.write_text(json.dumps(QUESTIONS), encoding="utf-8")
                 started = time.monotonic()
                 run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "batch", "--questions", str(path),
                                       "--base-url", f"http://127.0.0.1:{server.server_port}/v1",
                                       "--concurrency", "2", "--retries", "2"],
                                      cwd=ROOT, env={"PATH": os.environ["PATH"]},
                                      input="".join(json.dumps({"id": i, "state": f"s{i}"}) + "\n" for i in range(3)),
-                                     capture_output=True, text=True, timeout=20)
+                                     capture_output=True, encoding="utf-8", timeout=20)
                 elapsed = time.monotonic() - started
             finally:
                 server.shutdown()
@@ -378,13 +374,13 @@ class CliTests(unittest.TestCase):
         self.assertIn("supported question types", err)
 
     def test_versioned_example_sends_same_questions_as_legacy(self):
-        legacy = json.loads((ROOT / "examples/failure-patterns.json").read_text())
-        versioned = json.loads((ROOT / "examples/failure-patterns.v1.json").read_text())
+        legacy = json.loads((ROOT / "examples/failure-patterns.json").read_text(encoding="utf-8"))
+        versioned = json.loads((ROOT / "examples/failure-patterns.v1.json").read_text(encoding="utf-8"))
         self.assertEqual(versioned, {"schema_version": 1, "questions": legacy})
         bodies = []
         for name in ("failure-patterns.json", "failure-patterns.v1.json"):
             code, _, err, sent = self.run_cli('{"id":1,"state":"ok"}',
-                                              questions=(ROOT / "examples" / name).read_text())
+                                              questions=(ROOT / "examples" / name).read_text(encoding="utf-8"))
             self.assertEqual((code, err), (0, ""))
             bodies.append(json.loads(sent[0][0].data))
         self.assertEqual(bodies[0], bodies[1])
@@ -428,10 +424,10 @@ class CliTests(unittest.TestCase):
             source.write_text(raw, encoding="utf-8")
             args = [sys.executable, str(ROOT / "jev.py"), "summarize", "--input", str(source), *extra]
             if questions is not None:
-                (Path(tmp) / "q.json").write_text(json.dumps(questions))
+                (Path(tmp) / "q.json").write_text(json.dumps(questions), encoding="utf-8")
                 args += ["--questions", str(Path(tmp) / "q.json")]
-            run = subprocess.run(args, env={"PATH": os.environ["PATH"], "HOME": tmp, "PYTHONIOENCODING": "utf-8"},
-                                 capture_output=True, text=True, encoding="utf-8", timeout=10, stdin=subprocess.DEVNULL)
+            run = subprocess.run(args, env={"PATH": os.environ["PATH"], "HOME": tmp},
+                                 capture_output=True, encoding="utf-8", timeout=10, stdin=subprocess.DEVNULL)
             self.assertEqual(source.read_text(encoding="utf-8"), raw)
             return run
 
@@ -487,7 +483,7 @@ class CliTests(unittest.TestCase):
 
     def test_summarize_seeds_labels_from_legacy_and_versioned_question_files(self):
         line = {"id": 1, "answers": {"failure_pattern": {"type": "choice", "choice": "fine", "confidence": 0.5}}}
-        legacy = json.loads((ROOT / "examples/failure-patterns.json").read_text())
+        legacy = json.loads((ROOT / "examples/failure-patterns.json").read_text(encoding="utf-8"))
         counts = []
         for name in ("failure-patterns.json", "failure-patterns.v1.json"):
             run = self.summarize([line], "--questions", str(ROOT / "examples" / name))
@@ -504,8 +500,8 @@ class CliTests(unittest.TestCase):
         out = io.StringIO()
         with patch("jev.api_key") as key, patch("subprocess.run") as keychain, \
              patch("urllib.request.urlopen") as http, patch("sys.stdin", io.StringIO(line + "\n")), \
-             contextlib.redirect_stdout(out):
-            self.assertEqual(jev.main(["summarize", "--base-url", "https://api.typesafe.ai/v1"]), 0)
+             patch.dict(os.environ, {"JEV_BASE_URL": "https://api.typesafe.ai/v1"}), contextlib.redirect_stdout(out):
+            self.assertEqual(jev.main(["summarize"]), 0)
         key.assert_not_called()
         keychain.assert_not_called()
         http.assert_not_called()
@@ -520,10 +516,28 @@ class CliTests(unittest.TestCase):
 
     def test_classify_and_batch_still_require_questions(self):
         for command in ("classify", "batch"):
-            run = subprocess.run([sys.executable, str(ROOT / "jev.py"), command], capture_output=True, text=True,
+            run = subprocess.run([sys.executable, str(ROOT / "jev.py"), command], capture_output=True, encoding="utf-8",
                                  stdin=subprocess.DEVNULL)
             self.assertEqual(run.returncode, 2)
-            self.assertIn("--questions is required", run.stderr)
+            self.assertIn("the following arguments are required: --questions", run.stderr)
+
+    def test_each_command_rejects_flags_it_does_not_declare(self):
+        # Derived from the parser itself: a flag any command declares is a usage error on every command that does not.
+        commands = next(a for a in jev.build_parser()._actions if isinstance(a, argparse._SubParsersAction)).choices
+        declared = {name: {flag for action in sub._actions for flag in action.option_strings}
+                    for name, sub in commands.items()}
+        required = {name: [arg for action in sub._actions if action.required for arg in (action.option_strings[0], "x")]
+                    for name, sub in commands.items()}
+        every = set().union(*declared.values())
+        self.assertIn("--concurrency", every - declared["classify"])
+        for name, flags in declared.items():
+            for flag in sorted(every - flags):
+                with patch("sys.stdin", io.StringIO("")), patch("urllib.request.urlopen", side_effect=AssertionError), \
+                     patch("jev.api_key", side_effect=AssertionError), contextlib.redirect_stderr(io.StringIO()) as err, \
+                     self.assertRaises(SystemExit) as exit_:
+                    jev.main([name, *required[name], flag, "1"])
+                self.assertEqual(exit_.exception.code, 2, (name, flag))
+                self.assertIn(f"unrecognized arguments: {flag}", err.getvalue(), (name, flag))
 
     def test_cache_second_run_sends_nothing_and_reattaches_current_ids(self):
         with tempfile.TemporaryDirectory() as cache:
@@ -586,18 +600,18 @@ class CliTests(unittest.TestCase):
             self.assertEqual(len(self.run_cli(record, extra=["--cache", cache])[3]), 1)
             [entry] = Path(cache).rglob("*.json")
             self.assertEqual(entry.stat().st_mode & 0o777, 0o600)
-            stored = json.loads(entry.read_text())
+            stored = json.loads(entry.read_text(encoding="utf-8"))
             for corrupt in ("{trunc", "[]", json.dumps({**stored, "version": 2}), json.dumps({**stored, "key": "x"}),
                             json.dumps({**stored, "response": {"answers": {}, "id": 1}}), "\udcff"):
-                entry.write_text(corrupt, errors="surrogateescape")
+                entry.write_text(corrupt, errors="surrogateescape", encoding="utf-8")
                 code, out, err, sent = self.run_cli(record, extra=["--cache", cache])
                 self.assertEqual((code, err, len(sent), json.loads(out)), (0, "", 1, {"id": 1, **RESPONSE}))
-                self.assertEqual(json.loads(entry.read_text()), stored)
+                self.assertEqual(json.loads(entry.read_text(encoding="utf-8")), stored)
 
     def test_unwritable_cache_warns_and_keeps_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             blocker = Path(tmp) / "file"
-            blocker.write_text("")
+            blocker.write_text("", encoding="utf-8")
             code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}', extra=["--cache", str(blocker)])
         self.assertEqual((code, len(sent), json.loads(out)), (0, 1, {"id": 1, **RESPONSE}))
         self.assertIn("could not write cache entry", err)
@@ -712,20 +726,39 @@ class CliTests(unittest.TestCase):
     def test_dry_run_process_without_credentials(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "q.json"
-            path.write_text(json.dumps(QUESTIONS))
+            path.write_text(json.dumps(QUESTIONS), encoding="utf-8")
             run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "batch", "--dry-run", "--questions", str(path),
                                   "--base-url", "https://api.typesafe.ai/v1", "--model", "jev-1.14.0"],
                                  cwd=ROOT, env={"PATH": os.environ["PATH"]}, input='{"id":"p","state":"hello"}\n',
-                                 capture_output=True, text=True, timeout=10)
+                                 capture_output=True, encoding="utf-8", timeout=10)
         self.assertEqual((run.returncode, run.stderr), (0, ""))
         report = json.loads(run.stdout)
         self.assertEqual(report["records"][0]["id"], "p")
         self.assertNotEqual(Decimal(report["estimated_cost_usd"]), 0)
 
+    def test_stdio_is_utf8_whatever_the_locale(self):
+        # Regression: with an ASCII locale, UTF-8 JSONL made every command fail with "could not read input".
+        env = {"PATH": os.environ["PATH"], "PYTHONIOENCODING": "ascii", "LC_ALL": "C"}
+        result = {"id": "s\u00e9\u2028", "answers": {"q": {"type": "choice", "choice": "a", "confidence": 0.5}}}
+        run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "summarize"], env=env, capture_output=True,
+                             input=(json.dumps(result, ensure_ascii=False) + "\n").encode("utf-8"), timeout=10)
+        self.assertEqual((run.returncode, run.stderr), (0, b""))
+        self.assertEqual(json.loads(run.stdout.decode("utf-8"))["examples"], {"a": [result["id"]]})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "q.json"
+            path.write_text(json.dumps(QUESTIONS), encoding="utf-8")
+            run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "batch", "--dry-run", "--questions", str(path)],
+                                 env=env, capture_output=True, timeout=10,
+                                 input=(json.dumps({"id": "r\u00e9", "state": "caf\u00e9"}, ensure_ascii=False) + "\n").encode("utf-8"))
+        self.assertEqual((run.returncode, run.stderr), (0, b""))
+        self.assertEqual(json.loads(run.stdout.decode("utf-8"))["records"][0]["id"], "r\u00e9")
+
     def test_help_as_process(self):
-        result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "--help"], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "--help"], capture_output=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0)
         self.assertIn("batch", result.stdout)
+        result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "batch", "--help"], capture_output=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0)
         self.assertIn("sends nothing and reads no credentials", " ".join(result.stdout.split()))
 
 

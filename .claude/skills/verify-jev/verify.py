@@ -153,7 +153,7 @@ def clean(text):
 
 
 def sample(build_dir):
-    return (build_dir / ".private/demo/sample.jsonl").read_text()
+    return (build_dir / ".private/demo/sample.jsonl").read_text(encoding="utf-8")
 
 
 def write_unicode_sample(build_dir):
@@ -170,12 +170,12 @@ def demo_cache_clean(build_dir):
 def write_old_sample(build_dir):
     path = build_dir / ".private/demo/sample.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"id": "old-1", "state": {"messages": [{"role": "user", "text": DEMO_TEXT}]}}) + "\n")
+    path.write_text(json.dumps({"id": "old-1", "state": {"messages": [{"role": "user", "text": DEMO_TEXT}]}}) + "\n", encoding="utf-8")
 
 
 def corrupt_cache(work):
     for entry in (work / "cache-c").rglob("*.json"):
-        entry.write_text('{"version": 1, "key": "trunc')
+        entry.write_text('{"version": 1, "key": "trunc', encoding="utf-8")
 
 
 def no_cache_entries(name):
@@ -210,28 +210,33 @@ def journeys(stub_url):
     response = json.loads(STUB_RESPONSE)
     return {
         "cli-surface": [
-            Step("help", ["--help"], stdout=lambda o: "classify" in o and "summarize" in o and "--question " in o
-                 and "--questions" in o and "--dry-run" in o),
-            Step("help states the full retry rule", ["--help"],
+            Step("help", ["--help"], stdout=lambda o: all(c in o for c in ("classify", "batch", "eval", "summarize"))),
+            Step("batch help", ["batch", "--help"], stdout=lambda o: "--questions" in o and "--dry-run" in o
+                 and "--concurrency" in o and "--labels" not in o),
+            Step("summarize help", ["summarize", "--help"], stdout=lambda o: "--question " in o and "--retries" not in o),
+            Step("help states the full retry rule", ["batch", "--help"],
                  stdout=lambda o: "after HTTP 429 or 5xx, a connection error or timeout, or an 'Endpoint is unavailable' "
                  "error body on a status other than 401/403/422" in " ".join(o.split())),
             Step("missing questions is a usage error", ["classify"], code=2, stderr="--questions"),
             Step("nonfinite timeout rejected", ["classify", "--questions", "noul.json", "--timeout", "inf"],
                  code=1, stderr="jev: timeout must be positive and finite"),
             Step("batch refuses --input", ["batch", "--questions", "noul.json", "--input", "record.json"],
-                 code=1, stderr="jev: batch reads JSONL from stdin"),
+                 code=2, stderr="unrecognized arguments: --input"),
             Step("eval refuses --input", ["eval", "--questions", "choice.json", "--labels", "x", "--input", "record.json"],
-                 code=1, stderr="jev: eval reads JSONL from stdin"),
+                 code=2, stderr="unrecognized arguments: --input"),
             Step("concurrency 0 rejected before sending", ["batch", "--questions", "noul.json", "--concurrency", "0",
                                                            *stub_args], '{"id":1,"state":"x"}', stub=[ok()], code=1,
                  stderr="jev: concurrency must be between 1 and 32", requests=lambda r: r == []),
             Step("retries 11 rejected before sending", ["classify", "--questions", "noul.json", "--retries", "11",
                                                         *stub_args], '{"id":1,"state":"x"}', stub=[ok()], code=1,
                  stderr="jev: retries must be between 0 and 10", requests=lambda r: r == []),
-            Step("summarize refuses --concurrency", ["summarize", "--concurrency", "2"], code=1,
-                 stderr="jev: summarize sends no requests; --retries and --concurrency are for classify and batch"),
+            Step("summarize refuses --concurrency", ["summarize", "--concurrency", "2"], code=2,
+                 stderr="unrecognized arguments: --concurrency"),
+            Step("classify refuses --concurrency", ["classify", "--questions", "noul.json", "--concurrency", "2", *stub_args],
+                 '{"id":1,"state":"x"}', stub=[ok()], code=2, stderr="unrecognized arguments: --concurrency",
+                 requests=lambda r: r == []),
             Step("eval refuses --retries", ["eval", "--questions", "choice.json", "--labels", "x", "--retries", "1"],
-                 code=1, stderr="jev: eval sends no requests; --retries and --concurrency are for classify and batch"),
+                 code=2, stderr="unrecognized arguments: --retries"),
             Step("non-integer concurrency is a usage error", ["batch", "--questions", "noul.json", "--concurrency", "two"],
                  code=2, stderr="--concurrency"),
             Step("empty question mapping rejected", ["classify", "--questions", "empty.json"],
@@ -434,23 +439,24 @@ def journeys(stub_url):
                  "", code=1, stderr="jev: labels line 1: label must be one of the topic options"),
             Step("duplicate prediction id rejected", ["eval", "--questions", "choice.json", "--labels", "labels.jsonl"],
                  EVAL_RESULTS + EVAL_RESULTS.splitlines(True)[0], code=1, stderr="jev: predictions line 5: duplicate id"),
-            Step("eval requires --labels", ["eval", "--questions", "choice.json"], code=1, stderr="jev: eval requires --labels"),
+            Step("eval requires --labels", ["eval", "--questions", "choice.json"], code=2,
+                 stderr="the following arguments are required: --labels"),
             Step("non-Choice question rejected", ["eval", "--questions", "noul.json", "--labels", "labels.jsonl"],
                  code=1, stderr="jev: eval needs --question naming a Choice question"),
             Step("--cache rejected with eval", ["eval", "--questions", "choice.json", "--labels", "labels.jsonl",
-                                                 "--cache", "eval-cache"], EVAL_RESULTS, code=1,
-                 stderr="jev: eval sends no requests; --cache is for classify and batch", stdout=lambda o: o == ""),
+                                                 "--cache", "eval-cache"], EVAL_RESULTS, code=2,
+                 stderr="unrecognized arguments: --cache", stdout=lambda o: o == ""),
             Step("--dry-run rejected with eval", ["eval", "--questions", "choice.json", "--labels", "labels.jsonl",
-                                                   "--dry-run"], EVAL_RESULTS, code=1,
-                 stderr="jev: eval sends no requests; --dry-run is for classify and batch", stdout=lambda o: o == ""),
+                                                   "--dry-run"], EVAL_RESULTS, code=2,
+                 stderr="unrecognized arguments: --dry-run", stdout=lambda o: o == ""),
             Step("--labels is eval-only", ["batch", "--questions", "choice.json", "--labels", "labels.jsonl", *stub_args],
-                 '{"id":1,"state":"x"}', stub=[ok()], code=1, stderr="jev: --labels is for eval; --question is for eval and summarize",
+                 '{"id":1,"state":"x"}', stub=[ok()], code=2, stderr="unrecognized arguments: --labels",
                  requests=lambda r: r == []),
         ],
         "summarize": [
             Step("counts, first three ids, bins with 0 and 1 edges, offline",
-                 ["summarize", "--questions", "choice.json", "--input", "results.jsonl", *stub_args],
-                 env={"TYPESAFE_API_KEY": SENTINEL_KEY}, stub=[ok()],
+                 ["summarize", "--questions", "choice.json", "--input", "results.jsonl"],
+                 env={"TYPESAFE_API_KEY": SENTINEL_KEY, "JEV_BASE_URL": base}, stub=[ok()],
                  stderr='jev: line 6: confidence "high" is not a number\njev: line 7: confidence 1.5 is outside [0, 1]\n',
                  stdout=lambda o: (lambda s: s["question"] == "topic" and s["records"] == 7
                                    and s["counts"] == {"billing": 3, "bug": 4, "other": 0}
@@ -483,12 +489,12 @@ def journeys(stub_url):
                  stdout=lambda o: (lambda s: s["records"] == 0 and s["counts"] == {"billing": 0, "bug": 0, "other": 0}
                                    and not any(s["confidence"]["bins"].values()))(json.loads(o))),
             Step("--cache rejected, no cache dir", ["summarize", "--input", "results.jsonl", "--cache", "sum-cache"],
-                 code=1, stderr="jev: summarize sends no requests; --cache is for classify and batch",
+                 code=2, stderr="unrecognized arguments: --cache",
                  stdout=lambda o: o == "", files=lambda b: not (b.parent / "work" / "sum-cache").exists()),
-            Step("--dry-run rejected", ["summarize", "--input", "results.jsonl", "--dry-run"], code=1,
-                 stderr="jev: summarize sends no requests; --dry-run is for classify and batch", stdout=lambda o: o == ""),
-            Step("--labels rejected", ["summarize", "--input", "results.jsonl", "--labels", "labels.jsonl"], code=1,
-                 stderr="jev: --labels is for eval; --question is for eval and summarize", stdout=lambda o: o == ""),
+            Step("--dry-run rejected", ["summarize", "--input", "results.jsonl", "--dry-run"], code=2,
+                 stderr="unrecognized arguments: --dry-run", stdout=lambda o: o == ""),
+            Step("--labels rejected", ["summarize", "--input", "results.jsonl", "--labels", "labels.jsonl"], code=2,
+                 stderr="unrecognized arguments: --labels", stdout=lambda o: o == ""),
             Step("Score answer rejected with line", ["summarize"],
                  '{"id":1,"answers":{"level":{"type":"score","score":2}}}\n', code=1,
                  stderr="jev: summarize stopped at line 1; 'level' is not a Choice answer", stdout=lambda o: o == ""),
@@ -581,7 +587,7 @@ def journeys(stub_url):
                  stdout=lambda o: [r.get("chunks") for r in lines_json(o)[0]["records"]] == [None, 3],
                  requests=lambda r: r == []),
             Step("offline summarize rejects --chunk-tokens", ["summarize", "--input", "results.jsonl", "--chunk-tokens", "30000"],
-                 code=1, stderr="jev: summarize sends no requests; --chunk-tokens is for classify and batch"),
+                 code=2, stderr="unrecognized arguments: --chunk-tokens"),
             Step("score question rejected before any request",
                  ["classify", "--questions", "score.json", "--chunk-tokens", "30000", *stub_args],
                  '{"id":1,"state":"x"}', stub=[ok()], code=1, stderr="only choice questions",
@@ -756,7 +762,7 @@ def build(run_dir, ref):
                 shutil.copy2(src, target / rel)
     else:
         archive = subprocess.run(["git", "-C", str(ROOT), "archive", ref], capture_output=True, check=True).stdout
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        with tarfile.open(fileobj=io.BytesIO(archive), encoding="utf-8") as tar:
             tar.extractall(target, filter="data")
     subprocess.run([sys.executable, "-m", "compileall", "-q", "jev.py", "scripts"], cwd=target, check=True)
     return target
@@ -868,7 +874,7 @@ def cmd_run(args):
         if not args.keep_build:
             shutil.rmtree(run_dir / "build", ignore_errors=True)
             shutil.rmtree(run_dir / "work", ignore_errors=True)
-    head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    head = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, encoding="utf-8").stdout.strip()
     (evidence / "results.json").write_text(json.dumps({"ref": args.ref, "head": head, "live": args.live,
                                                        "journeys": results}, indent=1, ensure_ascii=False), encoding="utf-8")
     transcript(results, evidence / "transcript.md")
@@ -887,10 +893,10 @@ def cmd_doctor(args):
     print(f"python {sys.version.split()[0]} at {sys.executable}")
     if sys.version_info < (3, 9):
         problems.append("python3 >= 3.9 required")
-    head = subprocess.run(["git", "-C", str(ROOT), "status", "-sb", "--porcelain"], capture_output=True, text=True)
+    head = subprocess.run(["git", "-C", str(ROOT), "status", "-sb", "--porcelain"], capture_output=True, encoding="utf-8")
     print("git: " + (head.stdout.splitlines() or ["?"])[0] + f", {len(head.stdout.splitlines()) - 1} changed paths")
     compiled = subprocess.run([sys.executable, "-c", f"import ast;ast.parse(open({str(ROOT / 'jev.py')!r}).read())"],
-                              capture_output=True, text=True)
+                              capture_output=True, encoding="utf-8")
     if compiled.returncode:
         problems.append("jev.py does not parse")
     try:

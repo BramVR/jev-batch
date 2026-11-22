@@ -83,7 +83,7 @@ class DemoTests(unittest.TestCase):
             shutil.copy(Path(demo.__file__).parents[1] / 'jev.py', root / 'jev.py')
             (root / 'examples').mkdir()
             (root / 'examples/failure-patterns.json').write_text(json.dumps({
-                'failure_pattern': {'type': 'choice', 'criteria': {'fine': 'Fine', 'loop': 'Loop'}}}))
+                'failure_pattern': {'type': 'choice', 'criteria': {'fine': 'Fine', 'loop': 'Loop'}}}), encoding="utf-8")
 
             def send(command, input=None, stdout=None, **kwargs):
                 if command[2] == 'summarize':
@@ -100,7 +100,7 @@ class DemoTests(unittest.TestCase):
                 self.assertEqual(demo.main(['--send']), 0)
             prepare.assert_not_called()
             self.assertEqual(hashlib.sha256(sample.read_bytes()).digest(), before)
-            summary = json.loads((folder / 'summary.json').read_text())
+            summary = json.loads((folder / 'summary.json').read_text(encoding="utf-8"))
             self.assertEqual(summary['sample_count'], 8)
             self.assertEqual(summary['classification_counts'], {'fine': 8, 'loop': 0})
             self.assertEqual(summary['example_ids_by_category'], {
@@ -126,12 +126,12 @@ class DemoTests(unittest.TestCase):
             folder.mkdir(parents=True)
             sample = folder / 'sample.jsonl'
             raw = ''.join(json.dumps({'id': i, 'state': 'test'}) + '\n' for i in range(9))
-            sample.write_text(raw)
+            sample.write_text(raw, encoding="utf-8")
             with patch.object(demo, 'ROOT', root), patch('subprocess.run') as send, \
                     contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 demo.main(['--send'])
             send.assert_not_called()
-            self.assertEqual(sample.read_text(), raw)
+            self.assertEqual(sample.read_text(encoding="utf-8"), raw)
 
 
 class RedactionTests(unittest.TestCase):
@@ -190,7 +190,7 @@ class DemoRedactionTests(unittest.TestCase):
             (sessions / f'{number}.jsonl').write_text(
                 session_line('session_meta', {'id': f'synthetic-{number}', 'cwd': '/elsewhere'})
                 + session_line('response_item', {'type': 'message', 'role': 'user',
-                                                 'content': [{'type': 'input_text', 'text': text}]}))
+                                                 'content': [{'type': 'input_text', 'text': text}]}), encoding="utf-8")
         self.sample = self.root / '.private/demo/sample.jsonl'
 
     def demo(self, args, base_url='http://127.0.0.1:9/v1', **extra_env):
@@ -204,8 +204,8 @@ class DemoRedactionTests(unittest.TestCase):
     def test_prepare_then_send_never_transmits_fixture_values(self):
         code, out = self.demo([])
         self.assertEqual(code, 0)
-        saved = self.sample.read_text()
-        assert_clean(self, saved + out + (self.root / '.private/demo/summary.json').read_text())
+        saved = self.sample.read_text(encoding="utf-8")
+        assert_clean(self, saved + out + (self.root / '.private/demo/summary.json').read_text(encoding="utf-8"))
         self.assertNotIn('sk-synth', saved, 'redacted before the 4000-character cap')
         self.assertIn('[REDACTED:token]', saved)
         summary = json.loads(out)
@@ -219,18 +219,18 @@ class DemoRedactionTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.sample.read_bytes(), before)
         self.assertEqual(len(server.bodies), 2)
-        assert_clean(self, ''.join(server.bodies) + out + (self.root / '.private/demo/summary.json').read_text())
+        assert_clean(self, ''.join(server.bodies) + out + (self.root / '.private/demo/summary.json').read_text(encoding="utf-8"))
         self.assertIn('[REDACTED:home]', ''.join(server.bodies))
         self.assertEqual(json.loads(out)['redaction']['counts'], {})
 
     def test_send_redacts_outgoing_copy_of_older_unredacted_sample(self):
         self.sample.parent.mkdir(parents=True)
         raw = json.dumps({'id': 'old-1', 'state': {'messages': [{'role': 'user', 'text': FIXTURE_TEXT}]}}) + '\n'
-        self.sample.write_text(raw)
+        self.sample.write_text(raw, encoding="utf-8")
         with Capture() as server:
             code, out = self.demo(['--send'], server.url)
         self.assertEqual(code, 0)
-        self.assertEqual(self.sample.read_text(), raw)
+        self.assertEqual(self.sample.read_text(encoding="utf-8"), raw)
         assert_clean(self, ''.join(server.bodies) + out)
         self.assertEqual(json.loads(server.bodies[0])['state']['messages'][0]['role'], 'user')
         self.assertEqual(json.loads(out)['redaction']['counts']['bearer'], 1)
@@ -240,10 +240,10 @@ class DemoRedactionTests(unittest.TestCase):
         (self.home / '.codex/sessions/0.jsonl').write_text(
             session_line('session_meta', {'id': 'synthetic-0', 'cwd': '/elsewhere'})
             + session_line('response_item', {'type': 'message', 'role': 'user', 'content': [
-                {'type': 'input_text', 'text': 'x' * 4100 + ' ' + FIXTURE_SECRETS['email']}]}))
+                {'type': 'input_text', 'text': 'x' * 4100 + ' ' + FIXTURE_SECRETS['email']}]}), encoding="utf-8")
         code, out = self.demo([])
         self.assertEqual(json.loads(out)['redaction']['counts'], {})
-        assert_clean(self, self.sample.read_text())
+        assert_clean(self, self.sample.read_text(encoding="utf-8"))
 
     def test_send_is_utf8_whatever_the_inherited_stdio_encoding(self):
         self.sample.parent.mkdir(parents=True)
@@ -258,7 +258,7 @@ class DemoRedactionTests(unittest.TestCase):
 
     def test_no_redact_is_explicit_opt_out(self):
         code, out = self.demo(['--no-redact'])
-        self.assertIn(FIXTURE_SECRETS['email'], self.sample.read_text())
+        self.assertIn(FIXTURE_SECRETS['email'], self.sample.read_text(encoding="utf-8"))
         self.assertEqual(json.loads(out)['redaction'], {'policy': 'disabled', 'counts': {}})
         with Capture() as server:
             self.demo(['--send', '--no-redact'], server.url)

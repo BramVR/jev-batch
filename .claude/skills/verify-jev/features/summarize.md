@@ -9,11 +9,11 @@
 - `summarize-bins` bins `0.0-0.1` through `0.9-1.0` include their lower edge; 0 lands in the first bin and 1 in the last.
 - `summarize-confidence-diagnostics` missing confidence counts as `missing`; non-numbers as `malformed` and values outside [0, 1] as `out_of_range`, each with a `jev: line N: ...` stderr line and exit 0.
 - `summarize-question-files` `--questions` takes a legacy mapping or a version-1 document, loaded and validated as for `classify`; both seed the same labels, and an unsupported `schema_version` exits 1 before any summary.
-- `summarize-flag-errors` `--cache`, `--dry-run`, and `--labels` exit 1 with no output; `--question` is shared with `eval`, and `classify`/`batch` reject it.
+- `summarize-flag-errors` summarize declares only `--questions`, `--input`, and `--question`; `--cache`, `--dry-run`, `--labels`, or any other flag exits 2 with no output.
 - `summarize-selection` several question names in the input exit 1 unless `--question` picks one.
 - `summarize-empty` empty input with a known question prints `records: 0` and zero bins.
 - `summarize-choice-only` a Score, Noul, or Box answer exits 1 naming the line.
-- `summarize-offline` no request leaves, whatever `--base-url` or `TYPESAFE_API_KEY` say.
+- `summarize-offline` no request leaves, whatever `JEV_BASE_URL` or `TYPESAFE_API_KEY` say.
 
 ## How to get to it (user POV)
 
@@ -27,12 +27,12 @@ Preconditions:
 - Doctor passes. The run writes synthetic `results.jsonl` (seven `topic` results, one ID ending in U+2028) `mixed.json` (Choice plus Noul), and `choice.v1.json` (the Choice mapping as a version-1 document) into `work/`. Steps also read the shared `choice.json` and `v2.json` fixtures.
 
 - **All steps.** Run `python3 .claude/skills/verify-jev/verify.py run summarize`. Every step prints `PASS`.
-- **Offline proof.** The first step points `--base-url` at the stub with the sentinel key set; the stub records zero requests.
+- **Offline proof.** The first step points `JEV_BASE_URL` at the stub with the sentinel key set; the stub records zero requests.
 - **Boundary proof.** The first step's stdout shows `0.0-0.1: 1`, `0.1-0.2: 1`, `0.9-1.0: 2`, and missing, malformed, out-of-range at 1 each.
 
 ## Gotchas
 
-- `--cache` and `--dry-run` are `classify`/`batch` flags. `summarize` rejects them with exit 1, as `eval` does, and creates no cache directory; summarize cached results by passing the JSONL that `batch --cache` printed.
+- `--cache` and `--dry-run` are `classify`/`batch` flags. `summarize` rejects them with exit 2, as `eval` does, and creates no cache directory; summarize cached results by passing the JSONL that `batch --cache` printed.
 
 - All lines are parsed before any answer is checked, so an invalid JSON line is reported ahead of an earlier non-Choice answer.
 - The step-level success rule allows stderr only when the step names expected stderr; diagnostics are expected on exit 0 here.

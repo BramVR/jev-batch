@@ -33,8 +33,8 @@ class EvalTests(unittest.TestCase):
     def run_eval(self, labels, predictions, questions=QUESTIONS, extra=("--question", "route")):
         with tempfile.TemporaryDirectory() as tmp:
             qpath, lpath = Path(tmp) / "q.json", Path(tmp) / "labels.jsonl"
-            qpath.write_text(json.dumps(questions))
-            lpath.write_text("".join(line + "\n" for line in labels))
+            qpath.write_text(json.dumps(questions), encoding="utf-8")
+            lpath.write_text("".join(line + "\n" for line in labels), encoding="utf-8")
             out, err = io.StringIO(), io.StringIO()
             with patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-only"}, clear=True), \
                  patch("sys.stdin", io.StringIO("".join(line + "\n" for line in predictions))), \
@@ -51,11 +51,11 @@ class EvalTests(unittest.TestCase):
 
     def test_example_fixture_through_fresh_cli_is_exact_and_unchanged(self):
         before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in EXAMPLE.iterdir()}
-        with tempfile.TemporaryDirectory() as tmp, (EXAMPLE / "results.jsonl").open() as stdin:
+        with tempfile.TemporaryDirectory() as tmp, (EXAMPLE / "results.jsonl").open(encoding="utf-8") as stdin:
             result = subprocess.run(
                 [sys.executable, str(ROOT / "jev.py"), "eval",
                  "--questions", str(EXAMPLE / "questions.json"), "--labels", str(EXAMPLE / "labels.jsonl")],
-                stdin=stdin, capture_output=True, text=True, timeout=30,
+                stdin=stdin, capture_output=True, encoding="utf-8", timeout=30,
                 env={"PATH": os.environ.get("PATH", ""), "HOME": tmp,
                      "JEV_BASE_URL": "https://api.typesafe.ai/v1", "TYPESAFE_API_KEY": "must-not-be-read"},
             )
@@ -133,19 +133,15 @@ class EvalTests(unittest.TestCase):
                                         questions={"route": QUESTIONS["route"]}, extra=())
         self.assertEqual((code, report["question"]), (0, "route"))
 
-    def test_eval_flags_are_eval_only(self):
+    def test_eval_requires_labels(self):
         with tempfile.TemporaryDirectory() as tmp:
             qpath = Path(tmp) / "q.json"
-            qpath.write_text(json.dumps(QUESTIONS))
-            for argv in (["batch", "--labels", "x"], ["classify", "--question", "route"],
-                         ["eval"], ["eval", "--labels", "x", "--input", "y"],
-                         ["eval", "--labels", "x", "--cache", str(Path(tmp) / "cache")],
-                         ["eval", "--labels", "x", "--dry-run"]):
-                err = io.StringIO()
-                with contextlib.redirect_stderr(err), patch("urllib.request.urlopen", side_effect=AssertionError):
-                    self.assertEqual(jev.main([*argv, "--questions", str(qpath)]), 1, argv)
-                self.assertTrue(err.getvalue().startswith("jev: "), argv)
-            self.assertFalse((Path(tmp) / "cache").exists())
+            qpath.write_text(json.dumps(QUESTIONS), encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as exit_:
+                jev.main(["eval", "--questions", str(qpath)])
+            self.assertEqual(exit_.exception.code, 2)
+            self.assertIn("the following arguments are required: --labels", err.getvalue())
 
 
 if __name__ == "__main__":
