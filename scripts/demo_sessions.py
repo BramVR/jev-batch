@@ -4,7 +4,6 @@
 import argparse
 from collections import Counter
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -147,15 +146,14 @@ def main(argv=None):
             run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "batch", "--questions",
                                   str(ROOT / "examples/failure-patterns.json"), "--cache", str(folder / "cache")],
                                  input="".join(json.dumps(r, ensure_ascii=False) + "\n" for r in outgoing),
-                                 stdout=output, stderr=subprocess.PIPE, encoding="utf-8",
-                                 env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                                 stdout=output, stderr=subprocess.PIPE, encoding="utf-8")
         results = read_jsonl(folder / "results.jsonl")
         if [r["id"] for r in results] != summary["session_ids"][:len(results)]:
             raise ValueError("result ids differ from input order")
         counted = subprocess.run([sys.executable, str(ROOT / "jev.py"), "summarize", "--questions",
                                   str(ROOT / "examples/failure-patterns.json"), "--question", "failure_pattern",
                                   "--input", str(folder / "results.jsonl")], capture_output=True, check=True,
-                                 encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                                 encoding="utf-8")
         counts = json.loads(counted.stdout)
         summary["classification_counts"] = counts["counts"]
         summary["example_ids_by_category"] = counts["examples"]

@@ -12,6 +12,7 @@ from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from fractions import Fraction
 import hashlib
+import io
 import json
 import math
 import os
@@ -687,6 +688,10 @@ def build_parser():
 
 
 def main(argv=None):
+    # JSONL is UTF-8 whatever the locale says; callers need not set PYTHONIOENCODING.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8")
     args = build_parser().parse_args(argv)
     try:
         return args.run(args)

@@ -34,7 +34,7 @@ Batch JSONL from stdin, one independent POST per line:
 python3 jev.py batch --questions examples/failure-patterns.json < records.jsonl > results.jsonl
 ```
 
-Flags follow the command, and each command accepts only its own: `python3 jev.py <command> --help` lists them. A flag the command does not take, such as `--cache` on `eval` or `--concurrency` on `classify`, exits 2 as a usage error before anything is read or sent. Flags are never abbreviated.
+Flags follow the command, and each command accepts only its own: `python3 jev.py <command> --help` lists them. A flag the command does not take, such as `--cache` on `eval` or `--concurrency` on `classify`, exits 2 as a usage error before anything is read or sent. Flags are never abbreviated. Stdin, stdout, and stderr are UTF-8 whatever the locale or `PYTHONIOENCODING` says.
 
 Each input is an object with `id` and `state`. IDs are any JSON value and pass through unchanged. State accepts a string, object, or array. Optional `assets` passes through the documented base64 image asset mapping. Other extra record fields are ignored. Blank lines are errors.
 

@@ -8,7 +8,7 @@
 - `redact-send` send leaves the saved sample unchanged, sends no fixture value, and reports zero second-pass counts for a freshly prepared sample. Its category counts, four seeded labels, and confidence bins come from `jev.py summarize` over the results.
 - `redact-old-sample` send redacts the outgoing copy of a raw sample made before redaction existed, and the file on disk stays raw.
 - `redact-opt-out` `--no-redact` sends the sample as extracted and reports policy `disabled`.
-- `demo-utf8` send pipes the sample to `jev.py batch` as UTF-8 and pins the child's stdio to UTF-8, as does the `jev.py summarize` call that counts the results, so non-ASCII text arrives intact even when the inherited `PYTHONIOENCODING` or locale is ASCII.
+- `demo-utf8` send pipes the sample to `jev.py batch` as UTF-8 and decodes the `jev.py summarize` output as UTF-8; `jev.py` pins its own stdio to UTF-8, so non-ASCII text arrives intact even when the inherited `PYTHONIOENCODING` or locale is ASCII.
 - `demo-cache` a repeated send of the same sample hits `.private/demo/cache` and makes no request. Details in [cache.md](./cache.md).
 - `demo-limit` `--limit` outside 1..20 exits 2 before any request.
 

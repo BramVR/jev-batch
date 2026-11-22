@@ -32,8 +32,8 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "bbe1404f0776108a8b1ec716f6c395f8800aff85",
-    "scripts/demo_sessions.py": "aefdd89b19f0dc1fb55430cdf2227387b93c7bab",
+    "jev.py": "61ce94e9589e9a39655130d6df6547f05d0288e2",
+    "scripts/demo_sessions.py": "f94cc67ba3329e75c13f4770f3810a533b411938",
 }
 KEY = "sentinel-key-not-real"
 SECRET_BODY = "SECRET-BODY-must-not-leak"
@@ -928,6 +928,34 @@ def check_redact_before_cap(c):
                 c.fail("redact-counts-kept", case, f"counts {dict(counts)}, saved placeholders {dict(kept)}")
 
 
+def stdio_probe(jev):
+    """Run summarize with stdin and stdout as ASCII-locale text streams; return (exit, stdout bytes)."""
+    line = json.dumps({"id": "\u00e9\u2028", "answers": {"q": {"type": "choice", "choice": "a", "confidence": 0.5}}},
+                      ensure_ascii=False) + "\n"
+    out_bytes = io.BytesIO()
+    stdin = io.TextIOWrapper(io.BytesIO(line.encode("utf-8")), encoding="ascii")
+    stdout = io.TextIOWrapper(out_bytes, encoding="ascii")
+    stderr = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="backslashreplace")
+    with patch("sys.stdin", stdin), patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+        try:
+            code = jev.main(["summarize"])
+        except BaseException as exc:
+            code = f"crash: {exc!r}"
+        stdout.flush()
+    return code, out_bytes.getvalue()
+
+
+def check_stdio(c):
+    c.cases += 1
+    code, out = stdio_probe(c.jev)
+    try:
+        examples = json.loads(out.decode("utf-8"))["examples"]
+    except (ValueError, KeyError):
+        examples = None
+    if code != 0 or examples != {"a": ["\u00e9\u2028"]}:
+        c.fail("stdio-utf8", "summarize under an ASCII locale", f"exit {code} stdout {out[:120]!r}")
+
+
 def drive_demo(c, argv, sample_lines):
     root = c.tmp / "demo-root"
     folder = root / ".private/demo"
@@ -941,9 +969,12 @@ def drive_demo(c, argv, sample_lines):
         sample.write_text("".join(json.dumps(r) + "\n" for r in sample_lines))
     before = sample.read_bytes() if sample.exists() else None
     sent, commands = [], []
+    # jev.py pins its own stdio to UTF-8 when the stdio-utf8 probe says so; otherwise it follows PYTHONIOENCODING.
+    child_pinned = stdio_probe(c.jev)[0] == 0
 
     def send(command, input=None, stdout=None, encoding=None, env=None, check=False, **kwargs):
         # Model a hostile locale: anything not pinned to UTF-8 on either side of the pipe is ASCII.
+        child = "utf-8" if child_pinned else (env or {}).get("PYTHONIOENCODING") or "ascii"
         if command[2] == "summarize":
             # The real summarize runs in-process; its stdout crosses the same modeled pipe back to the demo.
             buffer = io.StringIO()
@@ -951,11 +982,11 @@ def drive_demo(c, argv, sample_lines):
                 code = c.jev.main(command[2:])
             if check and code:
                 raise subprocess.CalledProcessError(code, command)
-            text = buffer.getvalue().encode((env or {}).get("PYTHONIOENCODING") or "ascii").decode(encoding or "ascii")
+            text = buffer.getvalue().encode(child).decode(encoding or "ascii")
             return types.SimpleNamespace(returncode=code, stdout=text, stderr="")
         commands.append(command)
         try:
-            received = input.encode(encoding or "ascii").decode((env or {}).get("PYTHONIOENCODING") or "ascii")
+            received = input.encode(encoding or "ascii").decode(child)
         except UnicodeError:
             sent.append(None)
             return types.SimpleNamespace(returncode=1, stderr=GENERIC_ERROR)
@@ -1784,6 +1815,8 @@ MUTANTS = [
        "        questions = read_json(args.questions.read_text(encoding=\"utf-8\"))\n        if question is None")]),
     ("summarize reads credentials", "summarize-offline",
      [("def run_summarize(args):\n", "def run_summarize(args):\n    api_key()\n")]),
+    ("jev.py stdio left to the locale encoding", "stdio-utf8",
+     [('            stream.reconfigure(encoding="utf-8")', "            pass")]),
     ("flag abbreviations allowed", "flags-scoped",
      [('commands.add_parser("classify", allow_abbrev=False, ', 'commands.add_parser("classify", ')]),
     ("offline command declares a sending flag", "flags-scoped",
@@ -1832,7 +1865,7 @@ DEMO_MUTANTS = [
     ("demo send without the cache", "demo-send-caches",
      [(', "--cache", str(folder / "cache")]', "]")]),
     ("summarize pipe not pinned to UTF-8", "demo-send-clean-exit",
-     [('capture_output=True, check=True,\n                                 encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"})',
+     [('capture_output=True, check=True,\n                                 encoding="utf-8")',
        'capture_output=True, check=True, text=True)')]),
     ("demo drops summarize example IDs", "demo-send-summarize",
      [('summary["example_ids_by_category"] = counts["examples"]', 'summary["example_ids_by_category"] = {}')]),
@@ -1846,9 +1879,7 @@ DEMO_MUTANTS = [
      [("text = redact(text, Counter())", "text = redact(text, early := Counter())"),
       ("hits = Counter(RULE_BY_LABEL[label] for label in PLACEHOLDER.findall(text)) if counts", "hits = early if counts")]),
     ("send pipe left to the locale encoding", "demo-send-utf8",
-     [('encoding="utf-8",', "text=True,")]),
-    ("jev.py stdio left to the locale encoding", "demo-send-utf8",
-     [('env={**os.environ, "PYTHONIOENCODING": "utf-8"}', "env=os.environ")]),
+     [('stderr=subprocess.PIPE, encoding="utf-8")', "stderr=subprocess.PIPE, text=True)")]),
     ("arrays not recursed", "redact-no-fixture-survives",
      [("        return [redact(item, counts) for item in value]", "        return value")]),
     ("record id redacted", "redact-id-kept",
@@ -1892,7 +1923,7 @@ def run_all(jev, demo, depth, only=None):
     with tempfile.TemporaryDirectory() as tmp:
         c = Checker(jev, tmp, demo)
         for name, fn in (("batch", lambda: check_batch(c, depth)), ("schedules", lambda: check_schedules(c)),
-                         ("retry", lambda: check_retry_policy(c)), ("requests", lambda: (check_requests(c), check_flag_scope(c))),
+                         ("retry", lambda: check_retry_policy(c)), ("requests", lambda: (check_requests(c), check_flag_scope(c), check_stdio(c))),
                          ("numbers", lambda: check_numbers(c)), ("questions", lambda: check_question_files(c)),
                          ("redaction", lambda: (check_redaction(c), check_redact_before_cap(c), check_demo_send(c))),
                          ("cache", lambda: check_cache(c, min(depth, 2))),

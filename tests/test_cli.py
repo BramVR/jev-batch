@@ -426,8 +426,8 @@ class CliTests(unittest.TestCase):
             if questions is not None:
                 (Path(tmp) / "q.json").write_text(json.dumps(questions))
                 args += ["--questions", str(Path(tmp) / "q.json")]
-            run = subprocess.run(args, env={"PATH": os.environ["PATH"], "HOME": tmp, "PYTHONIOENCODING": "utf-8"},
-                                 capture_output=True, text=True, encoding="utf-8", timeout=10, stdin=subprocess.DEVNULL)
+            run = subprocess.run(args, env={"PATH": os.environ["PATH"], "HOME": tmp},
+                                 capture_output=True, encoding="utf-8", timeout=10, stdin=subprocess.DEVNULL)
             self.assertEqual(source.read_text(encoding="utf-8"), raw)
             return run
 
@@ -735,6 +735,23 @@ class CliTests(unittest.TestCase):
         report = json.loads(run.stdout)
         self.assertEqual(report["records"][0]["id"], "p")
         self.assertNotEqual(Decimal(report["estimated_cost_usd"]), 0)
+
+    def test_stdio_is_utf8_whatever_the_locale(self):
+        # Regression: with an ASCII locale, UTF-8 JSONL made every command fail with "could not read input".
+        env = {"PATH": os.environ["PATH"], "PYTHONIOENCODING": "ascii", "LC_ALL": "C"}
+        result = {"id": "s\u00e9\u2028", "answers": {"q": {"type": "choice", "choice": "a", "confidence": 0.5}}}
+        run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "summarize"], env=env, capture_output=True,
+                             input=(json.dumps(result, ensure_ascii=False) + "\n").encode("utf-8"), timeout=10)
+        self.assertEqual((run.returncode, run.stderr), (0, b""))
+        self.assertEqual(json.loads(run.stdout.decode("utf-8"))["examples"], {"a": [result["id"]]})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "q.json"
+            path.write_text(json.dumps(QUESTIONS), encoding="utf-8")
+            run = subprocess.run([sys.executable, str(ROOT / "jev.py"), "batch", "--dry-run", "--questions", str(path)],
+                                 env=env, capture_output=True, timeout=10,
+                                 input=(json.dumps({"id": "r\u00e9", "state": "caf\u00e9"}, ensure_ascii=False) + "\n").encode("utf-8"))
+        self.assertEqual((run.returncode, run.stderr), (0, b""))
+        self.assertEqual(json.loads(run.stdout.decode("utf-8"))["records"][0]["id"], "r\u00e9")
 
     def test_help_as_process(self):
         result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "--help"], capture_output=True, encoding="utf-8")
