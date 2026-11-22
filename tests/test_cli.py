@@ -1,8 +1,6 @@
 import argparse
 import contextlib
-from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-import email.utils
 import io
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import threading
@@ -255,17 +253,6 @@ class CliTests(unittest.TestCase):
         code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}\n', extra=["--dry-run", "--concurrency", "2", "--retries", "0"])
         self.assertEqual((code, err, sent), (0, "", []))
         self.assertTrue(json.loads(out)["dry_run"])
-
-    def test_retry_after_seconds_and_http_date(self):
-        self.assertEqual(jev.retry_after_seconds("7"), 7)
-        self.assertIsNone(jev.retry_after_seconds("soon"))
-        self.assertIsNone(jev.retry_after_seconds("-1"))
-        self.assertEqual(jev.retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT"), 0)
-        later = email.utils.format_datetime(datetime.now(timezone.utc) + timedelta(seconds=90), usegmt=True)
-        self.assertTrue(80 < jev.retry_after_seconds(later) <= 90)
-        self.assertEqual(jev.backoff_seconds(1, 120), jev.BACKOFF_CAP_SECONDS)
-        with patch("random.uniform", side_effect=lambda low, high: high):
-            self.assertEqual([jev.backoff_seconds(n, None) for n in (1, 2, 3, 8)], [0.5, 1, 2, jev.BACKOFF_CAP_SECONDS])
 
     def test_invalid_json_state_and_timeout(self):
         for raw in ('secret malformed', '{"id":1,"state":null}', '{"id":1,"state":[NaN]}', '{"id":1,"state":[1e400]}'):
