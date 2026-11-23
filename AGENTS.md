@@ -27,7 +27,7 @@ When a reviewer or the operator corrects a mistake, fix it and add or update a r
 | Help and error text derive facts from constants (`SCHEMA_VERSIONS`, `MAX_*`, `DEFAULT_*`). Send and `--dry-run` share `request_body()`. | `tests/test_cli.py` (patched `SCHEMA_VERSIONS`); formal `dry-run-measures-sent-bytes` + mutant; verify-jev `help states the full retry rule`. |
 | Question files load only through `load_questions()`. | Formal `questions-eval-same-loader` and the summarize loader mutant. |
 | After changing `jev.py` or `scripts/demo_sessions.py`, review `check.py` coverage, then update `SYNC_BLOBS`. | `check.py --stale` in CI. |
-| Prose restating the retry policy (README, SKILL.md, CHANGELOG) matches `jev.py batch --help`. | Judgment only. verify-jev checks the help sentence, not README. |
+| The retry rule has one source: `RETRY_RULE`, built from `NEVER_RETRIED` and `ENDPOINT_UNAVAILABLE`, which `send()` also uses. `--retries` help prints it; README and SKILL.md state it verbatim. | `tests/test_cli.py::test_docs_state_the_retry_rule_the_code_runs` (fails on the PR #15 README and on a code-only `NEVER_RETRIED` change); verify-jev `help states the full retry rule`. |
 
 ## Exceptions
 

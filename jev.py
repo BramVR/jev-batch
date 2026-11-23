@@ -43,6 +43,9 @@ BACKOFF_BASE_SECONDS = 0.5
 BACKOFF_CAP_SECONDS = 30.0
 ERROR_BODY_LIMIT = 4096
 ENDPOINT_UNAVAILABLE = b"Endpoint is unavailable"
+NEVER_RETRIED = (401, 403, 422)
+RETRY_RULE = (f"HTTP 429 or 5xx, a connection error or timeout, or an '{ENDPOINT_UNAVAILABLE.decode()}' error body "
+              f"on a status other than {'/'.join(map(str, NEVER_RETRIED))}")
 PRICES = {
     ("opencode.ai", "jev-1.13-free"): ("0", ZEN_PRICES),
     ("opencode.ai", "jev-1.13"): ("0.042", ZEN_PRICES),
@@ -288,7 +291,7 @@ def send(request, timeout):
         try:
             status = exc.code
             retry_after = retry_after_seconds((exc.headers or {}).get("Retry-After"))
-            unavailable = status not in (401, 403, 422) and ENDPOINT_UNAVAILABLE in (exc.read(ERROR_BODY_LIMIT) or b"")
+            unavailable = status not in NEVER_RETRIED and ENDPOINT_UNAVAILABLE in (exc.read(ERROR_BODY_LIMIT) or b"")
         except (OSError, ValueError):
             unavailable = False
         finally:
@@ -647,8 +650,7 @@ def build_parser():
                          help="validate, then print estimated input tokens and cost as one JSON object; "
                               "sends nothing and reads no credentials")
     sending.add_argument("--retries", type=int, default=DEFAULT_RETRIES,
-                         help=f"retries per request after HTTP 429 or 5xx, a connection error or timeout, or an "
-                              f"'Endpoint is unavailable' error body on a status other than 401/403/422 (default {DEFAULT_RETRIES}, max {MAX_RETRIES})")
+                         help=f"retries per request after {RETRY_RULE} (default {DEFAULT_RETRIES}, max {MAX_RETRIES})")
     sending.add_argument("--chunk-tokens", type=int, metavar="N",
                          help=f"split string state so each request stays within N estimated tokens "
                               f"(max {QUESTION_TOKEN_LIMIT}); choice questions only")

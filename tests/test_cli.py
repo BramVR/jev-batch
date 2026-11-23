@@ -759,6 +759,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("sends nothing and reads no credentials", " ".join(result.stdout.split()))
 
+    def test_docs_state_the_retry_rule_the_code_runs(self):
+        docs = {doc: " ".join((ROOT / doc).read_text(encoding="utf-8").split()) for doc in ("README.md", "SKILL.md")}
+        for doc, text in docs.items():
+            self.assertIn(jev.RETRY_RULE, text, f"{doc} must state jev.RETRY_RULE verbatim")
+        self.assertIn(f"(default {jev.DEFAULT_RETRIES}, max {jev.MAX_RETRIES}) after {jev.RETRY_RULE}", docs["README.md"])
+
 
 if __name__ == "__main__":
     unittest.main()
