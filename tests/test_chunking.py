@@ -132,9 +132,9 @@ class ChunkingTests(unittest.TestCase):
         code, out, err, sent = self.run_cli(json.dumps({"id": 1, "state": "x" * 25}), [], extra=["--dry-run"])
         self.assertEqual((code, err, sent), (0, "", []))
         row = json.loads(out)["records"][0]
-        single = jev.estimate({"id": None, "state": "x" * 10}, QUESTIONS, jev.Backend(jev.DEFAULT_BASE_URL, jev.DEFAULT_MODEL))
+        single = json.loads(self.run_cli(json.dumps({"id": 1, "state": "x" * 10}), [], budget=None, extra=["--dry-run"])[1])
         self.assertEqual(row["chunks"], 3)
-        self.assertEqual(row["question_tokens_estimate"], 3 * single["question_tokens_estimate"])
+        self.assertEqual(row["question_tokens_estimate"], 3 * single["records"][0]["question_tokens_estimate"])
 
     def test_bad_chunk_answer_stops_before_next_chunk(self):
         bad = answer(0.75, 0.25)
