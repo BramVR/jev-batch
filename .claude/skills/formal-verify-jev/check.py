@@ -112,7 +112,7 @@ def drive(jev, argv, stdin="", env=None, respond=None, waits=None, jitter=lambda
         except SystemExit as exc:
             run.code = exc.code
         except BaseException:
-            run.crash = traceback.format_exc(limit=1).strip().splitlines()[-1]
+            run.crash = traceback.format_exc(limit=1).strip().split("\n")[-1]
     out.flush()
     run.stdout = out_bytes.getvalue().decode("utf-8")
     run.stderr = err.getvalue()
@@ -277,7 +277,7 @@ def check_batch_case(c, questions, seq, concurrency, retries):
     if not c.clean_exit("batch-clean-exit", case, run):
         return
     expected = [{"id": json.loads(lines[i])["id"], **ok_response(i)} for i in range(k)]
-    got = [json.loads(x) for x in run.stdout.splitlines()]
+    got = [json.loads(x) for x in io.StringIO(run.stdout)]
     if not (len(got) == len(expected) and all(map(same, got, expected))):
         c.fail("batch-prefix", case, f"stdout {run.stdout!r} != prefix of {k} merged responses")
     # Lines before k and line k itself are fully decided. Later lines may run only inside the window
@@ -337,7 +337,7 @@ def check_schedules(c):
             case = f"schedule c={concurrency} completion ranks={ranks}"
             if not c.clean_exit("batch-clean-exit", case, run):
                 continue
-            got = [json.loads(x) for x in run.stdout.splitlines()]
+            got = [json.loads(x) for x in io.StringIO(run.stdout)]
             if (run.code, run.stderr) != (0, "") or not all(map(same, got, [{"id": i, **ok_response(i)} for i in range(n)])) \
                     or len(got) != n:
                 c.fail("batch-order-under-concurrency", case, f"exit {run.code} stdout {run.stdout!r}")
@@ -606,7 +606,7 @@ def check_numbers(c):
                 c.fail("numbers-nonfinite-rejected", case, f"exit {run.code} stdout {run.stdout[:120]!r}")
             continue
         expected = {"id": "n", **json.loads(raw)}
-        lines = run.stdout.splitlines()
+        lines = list(io.StringIO(run.stdout))
         if run.code != 0 or len(lines) != 1 or not same(json.loads(lines[0]), expected):
             c.fail("numbers-passthrough-exact", case, f"exit {run.code} stdout {run.stdout[:200]!r}")
 
@@ -686,8 +686,8 @@ def check_question_files(c):
             continue
         if run.code != 1 or run.requests:
             c.fail("questions-reject-before-network", case, f"exit {run.code}, {len(run.requests)} requests")
-        lines = run.stderr.splitlines()
-        if len(lines) != 1 or not lines[0].startswith("jev: ") or lines[0] == GENERIC_ERROR:
+        lines = run.stderr.removesuffix("\n").split("\n")
+        if len(lines) != 1 or not lines[0].isprintable() or not lines[0].startswith("jev: ") or lines[0] == GENERIC_ERROR:
             c.fail("questions-reject-message", case, f"stderr {run.stderr!r}")
         if PRIVATE in run.stderr + run.stdout:
             c.fail("questions-reject-no-echo", case, f"stderr {run.stderr[:200]!r}")
@@ -709,8 +709,8 @@ def check_question_files(c):
             if report.get("labels") != list(choice["criteria"]) or report.get("accuracy") != 1.0:
                 c.fail("questions-eval-same-loader", case, f"exit {run.code} stdout {run.stdout[:120]!r} stderr {run.stderr!r}")
             continue
-        lines = run.stderr.splitlines()
-        if run.code != 1 or run.stdout or len(lines) != 1 or not lines[0].startswith("jev: ") \
+        lines = run.stderr.removesuffix("\n").split("\n")
+        if run.code != 1 or run.stdout or len(lines) != 1 or not lines[0].isprintable() or not lines[0].startswith("jev: ") \
                 or lines[0] == GENERIC_ERROR or PRIVATE in run.stderr:
             c.fail("questions-eval-same-loader", case, f"exit {run.code} stderr {run.stderr[:200]!r}")
 
@@ -991,7 +991,7 @@ def drive_demo(c, argv, sample_lines):
             sent.append(None)
             return types.SimpleNamespace(returncode=1, stderr=GENERIC_ERROR)
         sent.append(received)
-        for line in received.splitlines():
+        for line in io.StringIO(received):
             stdout.write(json.dumps({"id": json.loads(line)["id"], "answers": {"failure_pattern": {"choice": "fine"}}}) + "\n")
         return types.SimpleNamespace(returncode=0, stderr="")
 
@@ -1030,7 +1030,7 @@ def check_demo_send(c):
             continue
         if not kept:
             c.fail("demo-send-sample-unchanged", case, "sample bytes changed")
-        lines = [json.loads(x) for x in sent[0].splitlines()]
+        lines = [json.loads(x) for x in io.StringIO(sent[0])]
         if [r["state"]["messages"][0]["text"][:7] for r in lines] != ["café ✓ "] * len(raw):
             c.fail("demo-send-utf8", case, "non-ASCII text changed on the way to jev.py")
         if [r["id"] for r in lines] != [r["id"] for r in raw]:
@@ -1201,7 +1201,7 @@ def check_cache(c, depth):
         if not c.clean_exit("cache-clean-exit", case, run):
             continue
         dup_sent = sum(json.loads(req["request"].data)["state"] == "dup" for req in run.requests)
-        got = [json.loads(x) for x in run.stdout.splitlines()]
+        got = [json.loads(x) for x in io.StringIO(run.stdout)]
         expected = [{"id": i, **ok_response(0)} for i in (1, 2, 3)]
         bound = 1 if concurrency == 1 else 2
         if run.code != 0 or not 1 <= dup_sent <= bound or len(cache_entries(cache)) != 2 \
@@ -1242,7 +1242,7 @@ def check_cache(c, depth):
                 if attempts != want:
                     c.fail("cache-resume-sends-only-missing", case, f"{attempt}: sent {attempts}, expected {want}")
                 expected = [{"id": json.loads(lines[i])["id"], **ok_response(i)} for i in range(emitted)]
-                got = [json.loads(x) for x in run.stdout.splitlines()]
+                got = [json.loads(x) for x in io.StringIO(run.stdout)]
                 if not (len(got) == len(expected) and all(map(same, got, expected))):
                     c.fail("cache-resume-output", case, f"{attempt}: stdout {run.stdout[:200]!r}")
 
@@ -1558,7 +1558,7 @@ def check_chunk_failures(c):
             CHUNK_FAILURES.items(), range(3), (("classify", 1), ("batch", 1), ("batch", 2))):
         c.cases += 1
         case = f"chunk-failure {command} concurrency={concurrency} {kind} at chunk {at + 1}/3"
-        stdin = lines if command == "batch" else lines.splitlines()[1]
+        stdin = lines if command == "batch" else lines.split("\n")[1]
         argv = [command, "--questions", path, "--chunk-tokens", budget, "--retries", "0"]
         argv += ["--concurrency", str(concurrency)] if command == "batch" else []
         run = drive(c.jev, argv, stdin, respond=by_state(FAILING_CHUNKS[at], responder))
@@ -1566,7 +1566,7 @@ def check_chunk_failures(c):
             continue
         prefix = "jev: batch stopped at line 2; " if command == "batch" else "jev: "
         expected_out = [{"id": "s", **choice_body(0.5, 0.5)}] if command == "batch" else []
-        got = [json.loads(x) for x in run.stdout.splitlines()]
+        got = [json.loads(x) for x in io.StringIO(run.stdout)]
         sent = [json.loads(r["request"].data)["state"] for r in run.requests]
         if (run.code != 1 or len(got) != len(expected_out) or not all(map(same, got, expected_out))
                 or [x for x in sent if x in FAILING_CHUNKS] != FAILING_CHUNKS[:at + 1]

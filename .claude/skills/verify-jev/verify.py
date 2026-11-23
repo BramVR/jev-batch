@@ -188,7 +188,7 @@ UNICODE_BYTES = len(json.dumps({"model": "jev-1.13-free", "state": "日本語�
 
 def report(out, status, cost=None, rows=None):
     """One dry-run JSON report: labelled estimate, pricing status, totals equal the rows, cost as stated."""
-    lines = out.splitlines()
+    lines = list(io.StringIO(out))
     if len(lines) != 1:
         return False
     r = json.loads(lines[0])
@@ -438,7 +438,7 @@ def journeys(stub_url):
             Step("label outside criteria rejected", ["eval", "--questions", "choice.json", "--labels", "bad-labels.jsonl"],
                  "", code=1, stderr="jev: labels line 1: label must be one of the topic options"),
             Step("duplicate prediction id rejected", ["eval", "--questions", "choice.json", "--labels", "labels.jsonl"],
-                 EVAL_RESULTS + EVAL_RESULTS.splitlines(True)[0], code=1, stderr="jev: predictions line 5: duplicate id"),
+                 EVAL_RESULTS + next(io.StringIO(EVAL_RESULTS)), code=1, stderr="jev: predictions line 5: duplicate id"),
             Step("eval requires --labels", ["eval", "--questions", "choice.json"], code=2,
                  stderr="the following arguments are required: --labels"),
             Step("non-Choice question rejected", ["eval", "--questions", "noul.json", "--labels", "labels.jsonl"],
@@ -789,7 +789,7 @@ def write_fixtures(work):
         {"type": "response_item", "payload": {"type": "message", "role": "user",
                                               "content": [{"type": "input_text", "text": DEMO_TEXT}]}})), encoding="utf-8")
     (work / "labels.jsonl").write_text(EVAL_LABELS, encoding="utf-8")
-    (work / "dup-labels.jsonl").write_text(EVAL_LABELS.splitlines(True)[0] * 2, encoding="utf-8")
+    (work / "dup-labels.jsonl").write_text(next(io.StringIO(EVAL_LABELS)) * 2, encoding="utf-8")
     (work / "bad-labels.jsonl").write_text('{"id": "e1", "label": "refund"}\n', encoding="utf-8")
 
 
@@ -894,7 +894,8 @@ def cmd_doctor(args):
     if sys.version_info < (3, 9):
         problems.append("python3 >= 3.9 required")
     head = subprocess.run(["git", "-C", str(ROOT), "status", "-sb", "--porcelain"], capture_output=True, encoding="utf-8")
-    print("git: " + (head.stdout.splitlines() or ["?"])[0] + f", {len(head.stdout.splitlines()) - 1} changed paths")
+    branch, *changed = head.stdout.rstrip("\n").split("\n")
+    print("git: " + (branch or "?") + f", {len(changed)} changed paths")
     compiled = subprocess.run([sys.executable, "-c", f"import ast;ast.parse(open({str(ROOT / 'jev.py')!r}).read())"],
                               capture_output=True, encoding="utf-8")
     if compiled.returncode:

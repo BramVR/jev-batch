@@ -34,12 +34,10 @@ class LintTests(unittest.TestCase):
                                'subprocess.run(cmd, capture_output=True)\n'
                                'with path.open(encoding="utf-8") as f:\n    rows = [json.loads(x) for x in f]\n'), [])
 
-    def test_splitlines_is_a_ratchet(self):
-        path = "tests/test_cli.py"
-        at_baseline = "x.splitlines()\n" * lint.SPLITLINES_BASELINE[path]
-        self.assertEqual(rules(at_baseline, path), [])
-        self.assertEqual(rules(at_baseline + "y.splitlines()\n", path), ["jsonl-splitlines"])
-        self.assertIn("lower SPLITLINES_BASELINE", lint.lint(Path(path), "")[0])
+    def test_every_splitlines_call_is_flagged_with_its_fix(self):
+        errors = lint.lint(Path("tests/test_cli.py"), "x.splitlines()\ny.splitlines(True)\n")
+        self.assertEqual([e.split(": ")[0] for e in errors], ["tests/test_cli.py:1", "tests/test_cli.py:2"])
+        self.assertIn("io.StringIO(text)", errors[0])
 
     def test_exception_needs_reason_expiry_and_approver(self):
         later = (date.today() + timedelta(days=30)).isoformat()

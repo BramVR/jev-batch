@@ -57,7 +57,7 @@ class CliTests(unittest.TestCase):
                    {"id": 42, "state": ["world"]}]
         code, out, err, sent = self.run_cli("\n".join(map(json.dumps, records)))
         self.assertEqual((code, err), (0, ""))
-        self.assertEqual([json.loads(x) for x in out.splitlines()],
+        self.assertEqual([json.loads(x) for x in io.StringIO(out)],
                          [{"id": r["id"], **RESPONSE} for r in records])
         for (req, timeout), record in zip(sent, records):
             self.assertEqual(req.full_url, "https://opencode.ai/zen/v1/systemone")
@@ -127,7 +127,7 @@ class CliTests(unittest.TestCase):
                 code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}\n{"id":2,"state":"ok"}\n',
                                                     response=lambda r: next(replies))
                 self.assertEqual((code, len(sent)), (1, 2))
-                self.assertEqual([json.loads(x)["id"] for x in out.splitlines()], [1])
+                self.assertEqual([json.loads(x)["id"] for x in io.StringIO(out)], [1])
                 self.assertEqual(err, "jev: batch stopped at line 2; System One returned invalid JSON\n")
                 code, out, err, _ = self.run_cli('{"id":1,"state":"ok"}', "classify", response=body)
                 self.assertEqual((code, out, err), (1, "", "jev: System One returned invalid JSON\n"))
@@ -156,7 +156,8 @@ class CliTests(unittest.TestCase):
     def test_bad_second_record_stops_with_prior_output(self):
         code, out, err, sent = self.run_cli('{"id":1,"state":"ok"}\n{"state":"bad"}\n')
         self.assertEqual(code, 1)
-        self.assertEqual(len(out.splitlines()), 1)
+        self.assertEqual([json.loads(x)["id"] for x in io.StringIO(out)], [1])
+        self.assertTrue(out.endswith("\n"))
         self.assertIn("line 2", err)
         self.assertEqual(len(sent), 1)
 
@@ -207,7 +208,7 @@ class CliTests(unittest.TestCase):
                  contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = jev.main(["batch", "--questions", str(questions), "--retries", "2"])
         self.assertEqual(code, 1)
-        self.assertEqual([json.loads(x)["id"] for x in out.getvalue().splitlines()], [1])
+        self.assertEqual([json.loads(x)["id"] for x in io.StringIO(out.getvalue())], [1])
         self.assertEqual(err.getvalue(), "jev: batch stopped at line 2; System One HTTP 503; gave up after 3 attempts\n")
         self.assertEqual(calls, ["a", "b", "b", "b"])
 
@@ -238,7 +239,7 @@ class CliTests(unittest.TestCase):
                      contextlib.redirect_stdout(out):
                     code = jev.main(["batch", "--questions", str(questions), "--concurrency", str(concurrency)])
                 self.assertEqual(code, 0)
-                self.assertEqual([json.loads(x) for x in out.getvalue().splitlines()],
+                self.assertEqual([json.loads(x) for x in io.StringIO(out.getvalue())],
                                  [{"id": i, "answers": {}, "n": i} for i in range(12)])
                 self.assertEqual(peak[0], concurrency)
 
@@ -362,7 +363,7 @@ class CliTests(unittest.TestCase):
                 server.shutdown()
                 worker.join()
         self.assertEqual((run.returncode, run.stderr), (0, ""))
-        self.assertEqual([json.loads(x) for x in run.stdout.splitlines()], [{"id": i, **RESPONSE} for i in range(3)])
+        self.assertEqual([json.loads(x) for x in io.StringIO(run.stdout)], [{"id": i, **RESPONSE} for i in range(3)])
         self.assertEqual([status for _, status in received], [429, 503, 200, 200, 200])
         self.assertEqual(sorted(state for state, status in received if status == 200), ["s0", "s1", "s2"])
         self.assertGreaterEqual(elapsed, 1)
@@ -455,7 +456,7 @@ class CliTests(unittest.TestCase):
                                                   "line 8: confidence true is not a number",
                                                   "line 9: confidence 1.5 is outside [0, 1]",
                                                   "line 10: confidence -0.1 is outside [0, 1]"])
-        self.assertEqual(run.stderr.splitlines(), ["jev: " + d for d in summary["diagnostics"]])
+        self.assertEqual(run.stderr.removesuffix("\n").split("\n"), ["jev: " + d for d in summary["diagnostics"]])
 
     def test_summarize_selection_empty_input_and_unsupported_answers(self):
         both = {"id": 1, "answers": {"x": {"type": "choice", "choice": "a"}, "y": {"type": "choice", "choice": "b"}}}
@@ -547,10 +548,10 @@ class CliTests(unittest.TestCase):
             renamed = [{**r, "id": f"new-{r['id']}"} for r in records]
             code, second, err, sent = self.run_cli("\n".join(map(json.dumps, renamed)), extra=["--cache", cache])
             self.assertEqual((code, err, sent), (0, "", []))
-            self.assertEqual([json.loads(x) for x in second.splitlines()],
+            self.assertEqual([json.loads(x) for x in io.StringIO(second)],
                              [{"id": r["id"], **RESPONSE} for r in renamed])
-            self.assertEqual([{**json.loads(x), "id": None} for x in first.splitlines()],
-                             [{**json.loads(x), "id": None} for x in second.splitlines()])
+            self.assertEqual([{**json.loads(x), "id": None} for x in io.StringIO(first)],
+                             [{**json.loads(x), "id": None} for x in io.StringIO(second)])
             code, out, err, sent = self.run_cli(json.dumps(records[0]), "classify", extra=["--cache", cache])
             self.assertEqual((code, err, sent, json.loads(out)), (0, "", [], {"id": "a", **RESPONSE}))
 
@@ -564,13 +565,14 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as cache:
             with patch("random.uniform", return_value=0):
                 code, out, err, sent = self.run_cli(data, response=fail_third, extra=["--cache", cache, "--retries", "1"])
-            self.assertEqual((code, len(out.splitlines())), (1, 2))
+            self.assertEqual((code, [json.loads(x)["id"] for x in io.StringIO(out)]), (1, [0, 1]))
+            self.assertTrue(out.endswith("\n"))
             self.assertEqual([json.loads(r.data)["state"] for r, _ in sent], ["s0", "s1", "s2", "s2"])
             self.assertIn("line 3", err)
             code, out, err, sent = self.run_cli(data, extra=["--cache", cache])
             self.assertEqual((code, err), (0, ""))
             self.assertEqual([json.loads(r.data)["state"] for r, _ in sent], ["s2", "s3"])
-            self.assertEqual([json.loads(x)["id"] for x in out.splitlines()], [0, 1, 2, 3])
+            self.assertEqual([json.loads(x)["id"] for x in io.StringIO(out)], [0, 1, 2, 3])
 
     def test_cache_misses_on_any_semantic_change(self):
         typesafe = ["--base-url", "https://api.typesafe.ai/v1", "--model", "jev-1.14.0"]
