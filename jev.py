@@ -43,7 +43,6 @@ BACKOFF_BASE_SECONDS = 0.5
 BACKOFF_CAP_SECONDS = 30.0
 ERROR_BODY_LIMIT = 4096
 ENDPOINT_UNAVAILABLE = b"Endpoint is unavailable"
-# (hostname, model) -> (input USD per million tokens, source). Both sources list output tokens as free.
 PRICES = {
     ("opencode.ai", "jev-1.13-free"): ("0", ZEN_PRICES),
     ("opencode.ai", "jev-1.13"): ("0.042", ZEN_PRICES),
@@ -106,8 +105,6 @@ CACHE_VERSION = 1
 
 @dataclass(frozen=True)
 class Cache:
-    """Validated System One responses keyed by endpoint and exact request body."""
-
     root: Path
 
     def path(self, endpoint, body):
@@ -140,7 +137,6 @@ class Cache:
                     os.unlink(temp)
                 raise
         except OSError:
-            # The request already succeeded and may be billed; keep its result.
             print("jev: warning: could not write cache entry", file=sys.stderr)
 
 
@@ -292,7 +288,6 @@ def send(request, timeout):
         try:
             status = exc.code
             retry_after = retry_after_seconds((exc.headers or {}).get("Retry-After"))
-            # Only the exact upstream phrase counts; the body itself is never surfaced.
             unavailable = status not in (401, 403, 422) and ENDPOINT_UNAVAILABLE in (exc.read(ERROR_BODY_LIMIT) or b"")
         except (OSError, ValueError):
             unavailable = False
@@ -330,7 +325,6 @@ def post(request, timeout, retries, stop):
 
 
 def respond(record_id, request, timeout, retries, stop, cache=None, check=None):
-    # Only validated responses are stored, after retries; a hit sends nothing and never retries.
     entry = cache.path(request.full_url, request.data) if cache else None
     result = cache.load(entry) if entry else None
     if result is not None:
@@ -343,7 +337,6 @@ def respond(record_id, request, timeout, retries, stop, cache=None, check=None):
     if "id" in result:
         raise JevError("System One response id collides with record id")
     if check:
-        # A caller-level rejection must never be cached, or every rerun replays it without asking again.
         check(result)
     if cache:
         cache.store(entry, result)
@@ -389,7 +382,6 @@ def check_chunk_questions(questions, budget):
 
 
 def chunk_plan(record, questions, budget):
-    """Validate a record for chunking and return its character spans; one span means send it unchanged."""
     if not isinstance(record, dict) or "id" not in record or "state" not in record:
         raise JevError("record must be an object with id and state")
     if not isinstance(record["state"], str) or "assets" in record:
@@ -407,10 +399,8 @@ def choice_probabilities(question, answer):
 
 def mean_choice(question, chunk_probabilities):
     labels = list(question["criteria"])
-    # Exact means: rounding a sum before dividing can flip the winner between near-equal labels.
     exact = {label: sum(map(Fraction, (p[label] for p in chunk_probabilities))) / len(chunk_probabilities)
              for label in labels}
-    # max() keeps the first maximal label, so ties go to criteria order.
     choice = max(labels, key=exact.__getitem__)
     total = {label: float(mean) for label, mean in exact.items()}
     return {"type": "choice", "choice": choice, "confidence": total[choice], "probabilities": total}
@@ -459,7 +449,6 @@ def emit(result):
 
 
 def batch(questions, key, backend, timeout, retries, concurrency, cache=None, chunk_tokens=None):
-    """Keep at most `concurrency` lines in flight and emit results strictly in input order."""
     stop = threading.Event()
     window = deque()
     lines = iter(sys.stdin)
@@ -646,8 +635,6 @@ def summarize(lines, question=None, questions=None):
 
 
 def build_parser():
-    """Each command declares only the flags it uses, so a flag on the wrong command is an argparse usage error.
-    allow_abbrev=False: otherwise classify would read --question as an abbreviation of --questions."""
     questions_help = (f"JSON questions file: raw API mapping or "
                       f"{{schema_version: {'|'.join(map(str, SCHEMA_VERSIONS))}, questions}}")
     sending = argparse.ArgumentParser(add_help=False)
@@ -688,7 +675,6 @@ def build_parser():
 
 
 def main(argv=None):
-    # JSONL is UTF-8 whatever the locale says; callers need not set PYTHONIOENCODING.
     for stream in (sys.stdin, sys.stdout, sys.stderr):
         if isinstance(stream, io.TextIOWrapper):
             stream.reconfigure(encoding="utf-8")
@@ -770,7 +756,6 @@ def run_summarize(args):
         if question is None and len(questions) == 1:
             question = next(iter(questions))
     if args.input:
-        # File iteration splits on newlines only, like stdin; str.splitlines would also split U+2028 inside JSON strings.
         with args.input.open(encoding="utf-8") as source:
             summary = summarize(source, question, questions)
     else:

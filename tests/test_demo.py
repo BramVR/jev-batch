@@ -43,8 +43,6 @@ def session_line(kind, payload):
 
 
 class Capture:
-    """Loopback System One that records every request body it receives."""
-
     def __enter__(self):
         bodies = self.bodies = []
 
@@ -210,7 +208,6 @@ class DemoRedactionTests(unittest.TestCase):
         self.assertIn('[REDACTED:token]', saved)
         summary = json.loads(out)
         self.assertEqual(summary['redaction']['policy'], demo.REDACTION_POLICY)
-        # The straddling token's placeholder is cut by the cap, so only complete placeholders count.
         self.assertEqual(summary['redaction']['counts'], {
             'assignment': 1, 'bearer': 1, 'email': 1, 'home_path': 3, 'token': 2})
         before = self.sample.read_bytes()
