@@ -26,5 +26,5 @@ Preconditions:
 ## Gotchas
 
 - The free model returns coarse values, often integer `0`/`1` probabilities and `0.99` for Noul. Checks accept ints.
-- The CLI retries connection errors, timeouts, 429, 5xx, and `Endpoint is unavailable` bodies up to 3 times. A step that still fails with `gave up after 4 attempts` points at the backend or network; rerun once before calling it a regression. `System One returned invalid JSON` is never retried and points at the API response, not the network.
+- The CLI retries HTTP 429 or 5xx, a connection error or timeout, or an 'Endpoint is unavailable' error body on a status other than 401/403/422, up to 3 times, so a flaky backend can push the run past six requests. A step that still fails with `gave up after 4 attempts` points at the backend or network; rerun once before calling it a regression. `System One returned invalid JSON` is never retried and points at the API response, not the network.
 - Never add session data or real user text to `LIVE`.

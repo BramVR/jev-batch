@@ -23,7 +23,7 @@ The maintained source for verifying what a jev-cli user can observe. Read this i
 
 ## Features
 
-- [CLI surface](./cli-surface.md) covers help, usage errors, and local validation of questions, retry, and concurrency flags.
+- [CLI surface](./cli-surface.md) covers help, usage errors, the Python version floor, and local validation of questions, retry, and concurrency flags.
 - [Question files](./question-files.md) covers version-1 and legacy question files, identical requests, and pre-HTTP rejection of bad files.
 - [Classify one record](./classify.md) covers stdin and `--input`, verbatim output, retried and permanent request failures.
 - [Batch JSONL](./batch.md) covers ordering, duplicates, retries, the concurrency bound, and stop-at-first-failure with preserved prefix.

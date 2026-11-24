@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Test the documented Python 3.9 floor in CI; on Python 3.8 or older, `jev.py` and `verify.py` now exit 1 with `needs Python 3.9+; this is <version>` instead of a traceback mid-run.
+
 - Read and write stdin, stdout, and stderr as UTF-8 whatever the locale, so UTF-8 JSONL no longer fails with `could not read input` under an ASCII or legacy locale; the demo drops its `PYTHONIOENCODING` pin.
 
 - Give each command its own flags: a flag the command does not use (`--cache`, `--dry-run`, `--retries`, `--chunk-tokens` on `eval`/`summarize`, `--concurrency` on `classify`, `--base-url` on `summarize`, `--input` on `batch`/`eval`) now exits 2 as a usage error instead of exit 1 or being silently ignored; `eval` without `--labels` also exits 2; flags are no longer abbreviated, so `classify --question` is not read as `--questions`; per-command flags moved to `jev.py <command> --help`.

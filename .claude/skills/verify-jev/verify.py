@@ -17,6 +17,10 @@ import tarfile
 import threading
 import time
 
+MIN_PYTHON = (3, 9)
+if sys.version_info < MIN_PYTHON:
+    sys.exit(f"verify.py needs Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+; this is {sys.version.split()[0]}")
+
 ROOT = Path(__file__).resolve().parents[3]
 RUNS = ROOT / ".private" / "verify"
 SECRET_BODY = "stub-private-body-must-not-leak"
@@ -891,8 +895,6 @@ def cmd_run(args):
 def cmd_doctor(args):
     problems = []
     print(f"python {sys.version.split()[0]} at {sys.executable}")
-    if sys.version_info < (3, 9):
-        problems.append("python3 >= 3.9 required")
     head = subprocess.run(["git", "-C", str(ROOT), "status", "-sb", "--porcelain"], capture_output=True, encoding="utf-8")
     branch, *changed = head.stdout.rstrip("\n").split("\n")
     print("git: " + (branch or "?") + f", {len(changed)} changed paths")

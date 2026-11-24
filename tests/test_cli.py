@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import threading
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -751,6 +752,16 @@ class CliTests(unittest.TestCase):
         for doc, text in docs.items():
             self.assertIn(jev.RETRY_RULE, text, f"{doc} must state jev.RETRY_RULE verbatim")
         self.assertIn(f"(default {jev.DEFAULT_RETRIES}, max {jev.MAX_RETRIES}) after {jev.RETRY_RULE}", docs["README.md"])
+
+    def test_documented_python_floor_is_the_lowest_ci_version(self):
+        matrix = re.search(r"python: \[(.*)\]", (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))[1]
+        lowest = min(tuple(map(int, v.strip(' "').split("."))) for v in matrix.split(","))
+        self.assertEqual(jev.MIN_PYTHON, lowest)
+        floor = "Python {}.{}+".format(*lowest)
+        verify = ROOT / ".claude/skills/verify-jev"
+        self.assertIn(f"MIN_PYTHON = {lowest}", (verify / "verify.py").read_text(encoding="utf-8"))
+        for doc in (ROOT / "README.md", verify / "SKILL.md"):
+            self.assertIn(floor, doc.read_text(encoding="utf-8"), f"{doc.name} must state the CI floor")
 
 
 if __name__ == "__main__":

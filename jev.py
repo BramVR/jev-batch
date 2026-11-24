@@ -27,6 +27,10 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
+MIN_PYTHON = (3, 9)
+if sys.version_info < MIN_PYTHON:
+    sys.exit(f"jev.py needs Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+; this is {sys.version.split()[0]}")
+
 DEFAULT_BASE_URL = "https://opencode.ai/zen/v1"
 DEFAULT_MODEL = "jev-1.13-free"
 SCHEMA_VERSIONS = (1,)

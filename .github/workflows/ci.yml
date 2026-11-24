@@ -10,11 +10,12 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04 has no setup-python build of 3.9; 24.04 does.
+    runs-on: ${{ matrix.python == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.13"]
+        python: ["3.9", "3.11", "3.13"]
     steps:
       # check.py --stale diffs against an older sync commit, so it needs full history.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,3 +36,20 @@ jobs:
         run: python3 .claude/skills/formal-verify-jev/check.py --mutants
       - name: formal-verify-jev stale
         run: python3 .claude/skills/formal-verify-jev/check.py --stale
+
+  below-floor:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.8"
+      - name: jev.py and verify.py refuse Python 3.8 with a version message
+        run: |
+          for script in jev.py .claude/skills/verify-jev/verify.py; do
+            if out=$(python3 "$script" --help 2>&1); then echo "$script exited 0 on Python 3.8"; exit 1; fi
+            echo "$out"
+            [ "$out" = "$(basename "$script") needs Python 3.9+; this is $(python3 -c 'import platform; print(platform.python_version())')" ]
+          done
