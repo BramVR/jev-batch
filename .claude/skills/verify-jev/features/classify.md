@@ -28,7 +28,7 @@ Preconditions:
 
 - **All steps.** Run `python3 .claude/skills/verify-jev/verify.py run classify`. Every step prints `PASS`.
 - **Request proof.** In the transcript, `stub saw` for the first step shows path `/zen/v1/systemone`, the exact body, and no `authorization` header although `TYPESAFE_API_KEY` was set.
-- **Output proof.** The stdout line equals the stub body with `"id": "t-1"` prepended, byte for byte.
+- **Output proof.** The stdout line equals `json.dumps` of the parsed stub body with `"id": "t-1"` first, byte for byte. It is not the stub's raw bytes: the compact body gains spaces after `,` and `:`, and `1e-7` prints as `1e-07`.
 
 ## Gotchas
 
