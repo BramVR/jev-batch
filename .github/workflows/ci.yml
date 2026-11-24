@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04 has no setup-python build of 3.9; 24.04 does.
+    runs-on: ${{ matrix.python == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -37,7 +38,7 @@ jobs:
         run: python3 .claude/skills/formal-verify-jev/check.py --stale
 
   below-floor:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
