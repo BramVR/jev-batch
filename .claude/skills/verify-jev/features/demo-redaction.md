@@ -30,5 +30,5 @@ Preconditions:
 
 ## Gotchas
 
-- Steps run in order and share the build's `.private/demo/`. The old-sample and UTF-8 steps overwrite the sample with `setup` before they run.
+- Steps run in order and share the build's `.private/demo/`. Four steps overwrite the sample with `setup` before they run: the old-sample and `--no-redact` steps write the raw old sample, the UTF-8 and cache-rerun steps write the Unicode sample.
 - The `--limit 21` step passes on code without redaction too. It guards the existing limit, not redaction.
