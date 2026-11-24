@@ -15,7 +15,7 @@ Helper: `.claude/skills/verify-jev/verify.py` (stdlib only, Python 3.9+). Run ev
 python3 .claude/skills/verify-jev/verify.py doctor
 ```
 
-Read-only. Reports Python version, git state, whether loopback can host the stub, whether `opencode.ai` resolves, and leftover scratch dirs. Exit 1 means do not drive yet. Run it first whenever a run looks wrong.
+Read-only. Below `MIN_PYTHON`, every `verify.py` command, doctor included, exits 1 with `verify.py needs Python X.Y+; this is <version>` before it does anything. Otherwise doctor reports Python version, git state, whether loopback can host the stub, whether `opencode.ai` resolves, and leftover scratch dirs. Exit 1 means do not drive yet. Run it first whenever a run looks wrong.
 
 ## Launch and drive
 
