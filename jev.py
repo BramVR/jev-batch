@@ -606,7 +606,7 @@ def summarize(lines, question=None, questions=None):
     labels = ()
     if questions and question in questions:
         spec = questions[question]
-        if not isinstance(spec, dict) or spec.get("type") != "choice" or not isinstance(spec.get("criteria"), dict):
+        if spec["type"] != "choice" or not isinstance(spec.get("criteria"), dict):
             raise JevError(f"summarize supports Choice questions only; {question!r} is not one")
         labels = list(spec["criteria"])
     counts = dict.fromkeys(labels, 0)

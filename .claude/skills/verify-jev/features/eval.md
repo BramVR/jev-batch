@@ -7,7 +7,7 @@
 - `eval-metrics` exact `counts`, `correct`, `accuracy`, `confusion[label][choice]`, and ten fixed calibration buckets with `count`, `mean_confidence`, `accuracy`.
 - `eval-denominators` missing predictions and unknown choices are unscored; extra predictions are counted and ignored; missing or out-of-range confidence is scored but not calibrated.
 - `eval-offline` nothing reaches System One even with `JEV_BASE_URL` set and a key in the env.
-- `eval-input-errors` duplicate IDs in either file, a label outside criteria keys, an empty labels file, and malformed lines exit 1 with no stdout and name the file and line.
+- `eval-input-errors` duplicate IDs in either file, a label outside criteria keys, an empty labels file, and malformed lines exit 1 with no stdout. Line errors name the input (`labels` or `predictions`) and line number; an empty labels file reports `labels file has no records`.
 - `eval-question-files` `--questions` accepts either question-file form through the same loader as `classify` and `batch`; a version-1 document scores identically and an unknown `schema_version` exits 1 before scoring.
 - `eval-flags` eval requires `--labels` (argparse, exit 2); `--question` must name a Choice question (optional when the mapping has one). eval declares only `--questions`, `--labels`, and `--question`, so any other flag exits 2, and `classify`/`batch` reject `--labels`.
 
@@ -20,7 +20,7 @@
 
 Preconditions:
 
-- Doctor passes. `choice.json`, `choice.v1.json`, `v2.json`, `labels.jsonl`, `dup-labels.jsonl`, and `bad-labels.jsonl` are written into `work/`; predictions come from `EVAL_RESULTS` on stdin.
+- Doctor passes. `choice.json`, `choice.v1.json`, `v2.json`, `noul.json`, `labels.jsonl`, `dup-labels.jsonl`, and `bad-labels.jsonl` are written into `work/`; predictions come from `EVAL_RESULTS` on stdin.
 
 - **All steps.** Run `python3 .claude/skills/verify-jev/verify.py run eval`. Every step prints `PASS`.
 - **Metrics proof.** `scores fixture exactly, sends nothing` checks the hand-computed report in `eval_ok()` and that the stub saw zero requests.

@@ -502,6 +502,9 @@ def journeys(stub_url):
             Step("Score answer rejected with line", ["summarize"],
                  '{"id":1,"answers":{"level":{"type":"score","score":2}}}\n', code=1,
                  stderr="jev: summarize stopped at line 1; 'level' is not a Choice answer", stdout=lambda o: o == ""),
+            Step("non-Choice question in --questions rejected",
+                 ["summarize", "--questions", "mixed.json", "--question", "billing", "--input", "results.jsonl"], code=1,
+                 stderr="jev: summarize supports Choice questions only; 'billing' is not one\n", stdout=lambda o: o == ""),
         ],
         "chunk": [
             Step("small input keeps single-request output",

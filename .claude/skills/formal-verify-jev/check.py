@@ -33,7 +33,7 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "a89c12d9f3a227ae6906e1d43fa9ca7f92ae820e",
+    "jev.py": "76f1227d884eb6d46de6f3d0b859798fd664ba1d",
     "scripts/demo_sessions.py": "85993fe7c2e4d7f521fd2e2e5f3d7382f5a1fb1b",
 }
 KEY = "sentinel-key-not-real"
@@ -735,6 +735,13 @@ SUMMARY_KINDS.update({"bad_json": "{", "no_id": '{"answers":{"q":{"choice":"a"}}
                       "score": '{"id":"s","answers":{"q":{"type":"score","score":1}}}'})
 SUMMARY_LABELS = ["a", "b", "c"]
 LONG_KINDS = ["a:0", "b:10", "score"]
+# Each passes load_questions; only a choice with mapping criteria may be summarized.
+SUMMARY_SPECS = {"choice": {"type": "choice", "criteria": {"x": "X", "y": "Y"}},
+                 "choice empty criteria": {"type": "choice", "criteria": {}},
+                 "choice list criteria": {"type": "choice", "criteria": ["x", "y"]},
+                 "choice no criteria": {"type": "choice"},
+                 "noul": NOUL,
+                 **{f"{kind} mapping criteria": {"type": kind, "criteria": {"x": "X"}} for kind in ("score", "noul", "box")}}
 BIN_NAMES = [f"{i / 10:.1f}-{(i + 1) / 10:.1f}" for i in range(10)]
 
 
@@ -823,6 +830,21 @@ def check_summarize(c, depth):
         for prop, ok in checks.items():
             if not ok:
                 c.fail(prop, case, f"exit {run.code} stdout {run.stdout[:300]!r} stderr {run.stderr[:120]!r}")
+    for (name, spec), versioned in itertools.product(SUMMARY_SPECS.items(), (False, True)):
+        c.cases += 1
+        mapping = {"q": spec, "n": NOUL}
+        case = f"summarize spec {name}" + (" versioned" if versioned else "")
+        path = c.questions_file({"schema_version": 1, "questions": mapping} if versioned else mapping)
+        run = drive(c.jev, ["summarize", "--question", "q", "--questions", path], "")
+        if not c.clean_exit("summarize-choice-only", case, run):
+            continue
+        criteria = spec.get("criteria")
+        if spec["type"] == "choice" and isinstance(criteria, dict):
+            ok = run.code == 0 and run.stdout and json.loads(run.stdout)["counts"] == dict.fromkeys(criteria, 0)
+        else:
+            ok = (run.code, run.stdout, run.stderr) == (1, "", "jev: summarize supports Choice questions only; 'q' is not one\n")
+        if not ok or run.requests:
+            c.fail("summarize-choice-only", case, f"exit {run.code} stdout {run.stdout[:120]!r} stderr {run.stderr[:120]!r}")
 
 
 # P5. Demo redaction: no planted value survives, structure and IDs stay, a second pass is a no-op,
@@ -1832,6 +1854,10 @@ MUTANTS = [
     ("summarize parses --questions without load_questions", "summarize-counts",
      [("        questions = load_questions(args.questions)\n        if question is None",
        "        questions = read_json(args.questions.read_text(encoding=\"utf-8\"))\n        if question is None")]),
+    ("summarize counts a non-Choice question", "summarize-choice-only",
+     [('if spec["type"] != "choice" or not', "if not")]),
+    ("summarize seeds labels from non-mapping criteria", "summarize-choice-only",
+     [(' or not isinstance(spec.get("criteria"), dict):\n', ":\n")]),
     ("summarize reads credentials", "summarize-offline",
      [("def run_summarize(args):\n", "def run_summarize(args):\n    api_key()\n")]),
     ("jev.py stdio left to the locale encoding", "stdio-utf8",

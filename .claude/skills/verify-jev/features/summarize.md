@@ -12,7 +12,7 @@
 - `summarize-flag-errors` summarize declares only `--questions`, `--input`, and `--question`; `--cache`, `--dry-run`, `--labels`, or any other flag exits 2 with no output.
 - `summarize-selection` several question names in the input exit 1 unless `--question` picks one.
 - `summarize-empty` empty input with a known question prints `records: 0` and zero bins.
-- `summarize-choice-only` a Score, Noul, or Box answer exits 1 naming the line.
+- `summarize-choice-only` a Score, Noul, or Box answer exits 1 naming the line. A selected question that `--questions` defines as anything but a Choice question with a `criteria` mapping exits 1 with `summarize supports Choice questions only; 'NAME' is not one` and no output.
 - `summarize-offline` no request leaves, whatever `JEV_BASE_URL` or `TYPESAFE_API_KEY` say.
 
 ## How to get to it (user POV)
