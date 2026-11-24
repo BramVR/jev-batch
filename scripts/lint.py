@@ -38,7 +38,7 @@ def encoding_problem(call):
     func = call.func
     name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
     owner = func.value.id if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) else None
-    if name == "open" and owner != "os" and text_mode(call, 1 if owner is None and isinstance(func, ast.Name) else 0):
+    if name == "open" and owner != "os" and text_mode(call, 1 if isinstance(func, ast.Name) else 0):
         return f"open() in text mode without encoding= uses the locale; {UTF8}"
     if name == "fdopen" and text_mode(call, 1):
         return f"os.fdopen() in text mode without encoding= uses the locale; {UTF8}"
