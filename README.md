@@ -13,7 +13,7 @@ uv tool install jev-batch
 pipx install jev-batch
 ```
 
-Run it from git with no package registry:
+Run it straight from git, before or without a PyPI release of jev-batch. The build still fetches setuptools from your package index:
 
 ```sh
 uvx --from git+https://github.com/BramVR/jev-batch jev-batch --version
