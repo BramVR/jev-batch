@@ -5,6 +5,7 @@ A user gets help, clear usage errors, and local rejection of bad flags or questi
 ## Sub-features
 
 - `help` top-level `--help` names all four commands; `batch --help` lists `--questions`, `--dry-run`, and `--concurrency` but not `--labels`; `summarize --help` lists `--question` but not `--retries`.
+- `version` `--version` prints `jev.py <__version__>` and exits 0, with the version read from the copied `jev.py`.
 - `help-retry-rule` the `--retries` help names every retry case: 429, 5xx, connection errors, timeouts, and the `Endpoint is unavailable` body on statuses other than 401/403/422. Keep it in step with README when the policy changes.
 - `usage-error` `classify`, `batch`, or `eval` without `--questions`, or `eval` without `--labels`, exits 2 from argparse.
 - `flag-scope` each command declares only its own flags, so a flag on the wrong command exits 2 with `unrecognized arguments` and sends nothing: `--input` on `batch` or `eval`, `--concurrency` on `classify` or `summarize`, `--retries` on `eval`.
@@ -16,7 +17,7 @@ A user gets help, clear usage errors, and local rejection of bad flags or questi
 
 ## How to get to it (user POV)
 
-- `python3 jev.py --help`, `python3 jev.py batch --help`
+- `python3 jev.py --help`, `python3 jev.py batch --help`, `python3 jev.py --version`
 - `python3 jev.py classify|batch|eval --questions <file> [flags]`
 - the README quick-start block, pasted into a shell
 

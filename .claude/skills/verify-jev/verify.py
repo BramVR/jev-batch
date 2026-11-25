@@ -223,7 +223,13 @@ def report(out, status, cost=None, rows=None):
             and (rows is None or [(x.get("line"), x["id"]) for x in records] == rows) and cost_ok)
 
 
-def journeys(stub_url):
+def copied_version(build_dir):
+    """The `__version__` literal in the copy under test, or None for a ref that has none."""
+    found = re.search(r'^__version__ = "([^"]+)"$', (build_dir / "jev.py").read_text(encoding="utf-8"), re.M)
+    return found and found[1]
+
+
+def journeys(stub_url, version):
     base = stub_url + "/zen/v1/"
     stub_args = ["--base-url", base]
     response = json.loads(STUB_RESPONSE)
@@ -233,6 +239,7 @@ def journeys(stub_url):
             Step("batch help", ["batch", "--help"], stdout=lambda o: "--questions" in o and "--dry-run" in o
                  and "--concurrency" in o and "--labels" not in o),
             Step("summarize help", ["summarize", "--help"], stdout=lambda o: "--question " in o and "--retries" not in o),
+            Step("version", ["--version"], stdout=lambda o: o == f"jev.py {version}\n"),
             Step("help states the full retry rule", ["batch", "--help"],
                  stdout=lambda o: "after HTTP 429 or 5xx, a connection error or timeout, or an 'Endpoint is unavailable' "
                  "error body on a status other than 401/403/422" in " ".join(o.split())),
@@ -297,7 +304,7 @@ def journeys(stub_url):
                  stdout=lambda o: o == '{"id": "t-1", ' + json.dumps(response)[1:] + "\n",
                  requests=lambda r: paths(r) == ["/zen/v1/systemone"]
                  and "authorization" not in r[0]["headers"]
-                 and r[0]["headers"].get("user-agent") == "jev-batch/0.1"
+                 and r[0]["headers"].get("user-agent") == f"jev-batch/{version}"
                  and r[0]["body"] == {"model": "jev-1.13-free", "state": "Charged twice", "questions": CHOICE}),
             Step("--input file record", ["classify", "--questions", "choice.json", "--input", "record.json", *stub_args],
                  stub=[ok()], stdout=lambda o: lines_json(o)[0]["id"] == {"ticket": 7},
@@ -887,7 +894,7 @@ def cmd_run(args):
         build_dir = build(run_dir, args.ref)
         work = run_dir / "work"
         write_fixtures(work)
-        table = journeys(stub.url)
+        table = journeys(stub.url, copied_version(build_dir))
         if args.live:
             table["live-opencode"] = LIVE
         chosen = args.journeys or list(table)

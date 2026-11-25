@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
+__version__ = "0.1.0"
 MIN_PYTHON = (3, 9)
 if sys.version_info < MIN_PYTHON:
     sys.exit(f"jev.py needs Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+; this is {sys.version.split()[0]}")
@@ -264,7 +265,7 @@ def dry_run_report(rows, backend):
 
 def prepare(record, questions, key, backend):
     payload = request_payload(record, questions, backend)
-    headers = {"Content-Type": "application/json", "User-Agent": "jev-batch/0.1"}
+    headers = {"Content-Type": "application/json", "User-Agent": f"jev-batch/{__version__}"}
     if key:
         headers["Authorization"] = "Bearer " + key
     if uses_images(payload):
@@ -660,6 +661,7 @@ def build_parser():
                               f"(max {QUESTION_TOKEN_LIMIT}); choice questions only")
 
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True, metavar="{classify,batch,eval,summarize}")
     classify_ = commands.add_parser("classify", allow_abbrev=False, parents=[sending], help="classify one {id,state} record")
     classify_.add_argument("--input", type=Path, help="one {id,state} JSON record; default stdin")
