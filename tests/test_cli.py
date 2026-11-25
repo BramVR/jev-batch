@@ -772,6 +772,7 @@ class CliTests(unittest.TestCase):
         self.assertIn(f"MIN_PYTHON = {lowest}", (verify / "verify.py").read_text(encoding="utf-8"))
         for doc in (ROOT / "README.md", verify / "SKILL.md"):
             self.assertIn(floor, doc.read_text(encoding="utf-8"), f"{doc.name} must state the CI floor")
+        self.assertIn('requires-python = ">={}.{}"'.format(*lowest), (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

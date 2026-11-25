@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jev-batch"
+dynamic = ["version"]
+description = "Classify many records with Jev System One, then score and count the results offline."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+
+[project.urls]
+Homepage = "https://github.com/BramVR/jev-batch"
+Repository = "https://github.com/BramVR/jev-batch"
+
+[project.scripts]
+jev-batch = "jev:main"
+
+[tool.setuptools]
+py-modules = ["jev"]
+
+[tool.setuptools.dynamic]
+version = {attr = "jev.__version__"}

@@ -2,7 +2,24 @@
 
 jev-batch classifies many records with Jev System One, then scores and counts the results offline.
 
-Python 3.9+ stdlib CLI for Jev System One. No installation or dependencies. Defaults to free OpenCode `POST https://opencode.ai/zen/v1/systemone`, model `jev-1.13-free`, without authentication.
+Python 3.9+ stdlib CLI for Jev System One, with no runtime dependencies. Defaults to free OpenCode `POST https://opencode.ai/zen/v1/systemone`, model `jev-1.13-free`, without authentication.
+
+## Install
+
+The installed command is `jev-batch`. There is no `jev` command, so it does not clash with other Jev CLIs.
+
+```sh
+uv tool install jev-batch
+pipx install jev-batch
+```
+
+Run it from git with no package registry:
+
+```sh
+uvx --from git+https://github.com/BramVR/jev-batch jev-batch --version
+```
+
+A checkout needs no install. The examples below run `python3 jev.py`, which is the same CLI; with an install, type `jev-batch` instead.
 
 ## Quick start
 
@@ -196,7 +213,7 @@ Question objects in the mapping pass through to the API, which validates their d
 - `score` uses `criteria` as an ordered array of level descriptions, indexed from zero. Answers include `score`, `legend`, `confidence`, and `probabilities`.
 - `noul` asks a yes/no question through `instructions`, with optional `criteria.true` and `criteria.false`. Answers contain `noul`, the probability of yes.
 
-Instructions and descriptions can be strings, objects, or arrays where documented. Free OpenCode and Jev 1.13 reject Box questions and image assets locally. With a supporting backend and model, Box questions pass through with optional record `assets` containing image `type`, `format`, and `data_base64`. The CLI automatically sends `TypeSafe-Danger-Zone-Images: true` for assets or Box questions. Box answers retain coordinates and confidence. Multipart, long-context headers, chunking beyond Choice text, and packaging are outside this version.
+Instructions and descriptions can be strings, objects, or arrays where documented. Free OpenCode and Jev 1.13 reject Box questions and image assets locally. With a supporting backend and model, Box questions pass through with optional record `assets` containing image `type`, `format`, and `data_base64`. The CLI automatically sends `TypeSafe-Danger-Zone-Images: true` for assets or Box questions. Box answers retain coordinates and confidence. Multipart, long-context headers, and chunking beyond Choice text are outside this version.
 
 Contracts checked 2026-11-14 against [models](https://docs.typesafe.ai/models), [System One](https://docs.typesafe.ai/api/system-one), [Choice](https://docs.typesafe.ai/primitives/choice), [Score](https://docs.typesafe.ai/primitives/score), [Noul](https://docs.typesafe.ai/primitives/noul), [Box](https://docs.typesafe.ai/primitives/box), and [OpenAPI](https://api.typesafe.ai/openapi.json). Jev's documented default limits are 64k tokens per request and 32k per question. Keep transcripts bounded.
 
@@ -272,7 +289,10 @@ python3 -m compileall -q jev.py scripts tests
 python3 jev.py --help
 python3 jev.py batch --help
 git diff --check
+python3 scripts/check_install.py
 ```
+
+`check_install.py` installs the package into a fresh venv and checks that `jev-batch --version` and `jev-batch classify --help` work, that no `jev` command exists, and that `pip show` lists no requirements. It needs network access to fetch setuptools.
 
 Tests mock HTTP at the CLI boundary, checking request shape/auth, complete responses, failures, retries and backoff, the concurrency bound, partial batch output, and credential selection. Eval tests check the example fixture's exact metrics through a fresh process, edge cases, and that eval sends nothing and reads no credentials. No live API credential is required for tests. Summarize tests run the CLI on synthetic result files.
 

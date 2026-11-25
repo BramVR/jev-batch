@@ -4,6 +4,8 @@
 
 - Add `--version`, which prints `jev.py 0.1.0` from a checkout; the User-Agent takes its version from the same constant.
 
+- Add `pyproject.toml`, so `pip install`, `pipx install`, or `uv tool install` gives a `jev-batch` command with no runtime dependencies; there is no `jev` command.
+
 - Rename the project to jev-batch, so requests now send `User-Agent: jev-batch/0.1.0`; add the MIT `LICENSE` and a README quick start that runs on the free OpenCode default with no key.
 
 - Test the documented Python 3.9 floor in CI; on Python 3.8 or older, `jev.py` and `verify.py` now exit 1 with `needs Python 3.9+; this is <version>` instead of a traceback mid-run.
