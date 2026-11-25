@@ -1,9 +1,9 @@
 ---
 name: verify-jev
-description: "Drive the jev-cli command line (jev.py classify/batch including --dry-run estimates, eval, summarize, scripts/demo_sessions.py) end to end against a fresh copy and capture evidence. Use after changing jev.py, the demo script or its redaction, flags, backend selection, cache, pricing, or output, or when asked to prove the CLI works."
+description: "Drive the jev-batch command line (jev.py classify/batch including --dry-run estimates, eval, summarize, scripts/demo_sessions.py) end to end against a fresh copy and capture evidence. Use after changing jev.py, the demo script or its redaction, flags, backend selection, cache, pricing, or output, or when asked to prove the CLI works."
 ---
 
-# Verify jev-cli
+# Verify jev-batch
 
 `jev.py` is a short-lived stdlib CLI. There is no server to keep alive. `verify.py` copies the code under test into an empty dir, runs each step as `python3 jev.py ...` or `python3 scripts/demo_sessions.py ...` in a fresh process with a scrubbed env, and points `--base-url` at a loopback stub of System One so the request the CLI actually sends is observable. Live calls to OpenCode are opt-in and limited to four tiny synthetic records, six requests unless the CLI retries a transient failure.
 

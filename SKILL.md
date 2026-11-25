@@ -1,5 +1,5 @@
 ---
-name: jev-classify
+name: jev-batch
 description: "Classify many records with Jev."
 ---
 

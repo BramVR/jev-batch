@@ -63,7 +63,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(req.get_method(), "POST")
             self.assertIsNone(req.get_header("Authorization"))
             self.assertEqual(req.get_header("Content-type"), "application/json")
-            self.assertEqual(req.get_header("User-agent"), "jev-cli/0.1")
+            self.assertEqual(req.get_header("User-agent"), "jev-batch/0.1")
             self.assertEqual(json.loads(req.data), {"model": "jev-1.13-free", "state": record["state"], "questions": QUESTIONS})
             self.assertEqual(timeout, 60)
 

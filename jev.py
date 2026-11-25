@@ -264,7 +264,7 @@ def dry_run_report(rows, backend):
 
 def prepare(record, questions, key, backend):
     payload = request_payload(record, questions, backend)
-    headers = {"Content-Type": "application/json", "User-Agent": "jev-cli/0.1"}
+    headers = {"Content-Type": "application/json", "User-Agent": "jev-batch/0.1"}
     if key:
         headers["Authorization"] = "Bearer " + key
     if uses_images(payload):

@@ -12,11 +12,13 @@ A user gets help, clear usage errors, and local rejection of bad flags or questi
 - `questions-guard` empty mapping or unknown question type exits 1, with or without `--dry-run`. Version and wrapper rules live in [question-files](./question-files.md).
 - `python-floor` below `MIN_PYTHON`, any `jev.py` invocation, `--help` included, exits 1 with `jev.py needs Python X.Y+; this is <version>` on stderr before parsing arguments. verify.py cannot drive it, because it would need an interpreter below the floor, and verify.py itself refuses one. CI job `below-floor` in `.github/workflows/ci.yml` proves it on 3.8. Locally, check only that the floor interpreter (the lowest CI matrix version) runs `jev.py --help` with exit 0.
 - `retry-concurrency-guard` `--concurrency` outside 1..32 or `--retries` outside 0..10 exits 1 with no request sent; a non-integer value exits 2 from argparse. `--dry-run` accepts in-range values and ignores them; out-of-range values still exit 1. Base URL rules are in [Backend selection](./backend-select.md).
+- `readme-quick-start` the `sh` code block under README `## Quick start`, run verbatim with `sh` in a fresh dir that holds only `jev.py`, with `JEV_BASE_URL` at the stub and the running interpreter's dir first on `PATH`, exits 0 and prints one JSON classification line. A README edit that removes the block stops `verify.py run` with an error.
 
 ## How to get to it (user POV)
 
 - `python3 jev.py --help`, `python3 jev.py batch --help`
 - `python3 jev.py classify|batch|eval --questions <file> [flags]`
+- the README quick-start block, pasted into a shell
 
 ## Driving it with verify.py
 

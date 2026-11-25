@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -80,6 +81,7 @@ class Step:
     files: object = None
     before: object = None
     min_seconds: float = 0
+    command: object = None
 
 
 # Stub System One: a real HTTP server on 127.0.0.1 reached through the user-facing --base-url.
@@ -186,6 +188,19 @@ def no_cache_entries(name):
     return lambda work: not any(p.is_file() for p in (work / name).rglob("*"))
 
 
+QUICK_START = re.compile(r"^## Quick start\n(?:(?!^## ).)*?^```sh\n(.*?)^```$", re.M | re.S)
+
+
+def readme_quick_start(build_dir):
+    block = QUICK_START.search((build_dir / "README.md").read_text(encoding="utf-8"))
+    if not block:
+        raise SystemExit("README.md has no ```sh block under ## Quick start")
+    fresh = build_dir / "quick-start"
+    fresh.mkdir()
+    shutil.copy2(build_dir / "jev.py", fresh)
+    return ["sh", "-c", block[1]], fresh
+
+
 UNICODE_RECORD = '{"id":"d-7","state":"日本語🙂 refund ünï"}'
 UNICODE_BYTES = len(json.dumps({"model": "jev-1.13-free", "state": "日本語🙂 refund ünï", "questions": NOUL}).encode())
 
@@ -249,6 +264,10 @@ def journeys(stub_url):
                  '{"id":1,"state":"x"}', code=1, stderr="jev: supported question types"),
             Step("dry run gets the same question guard", ["classify", "--dry-run", "--questions", "empty.json"],
                  '{"id":1,"state":"x"}', code=1, stderr="jev: questions must be a nonempty", stdout=lambda o: o == ""),
+            Step("README quick start runs verbatim", [], command=readme_quick_start, stub=[ok()],
+                 env={"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "JEV_BASE_URL": base},
+                 stdout=lambda o: o.count("\n") == 1 and "answers" in lines_json(o)[0],
+                 requests=lambda r: paths(r) == ["/zen/v1/systemone"]),
         ],
         "question-files": [
             Step("legacy mapping sends its questions", ["classify", "--questions", "noul.json", *stub_args],
@@ -278,7 +297,7 @@ def journeys(stub_url):
                  stdout=lambda o: o == '{"id": "t-1", ' + json.dumps(response)[1:] + "\n",
                  requests=lambda r: paths(r) == ["/zen/v1/systemone"]
                  and "authorization" not in r[0]["headers"]
-                 and r[0]["headers"].get("user-agent") == "jev-cli/0.1"
+                 and r[0]["headers"].get("user-agent") == "jev-batch/0.1"
                  and r[0]["body"] == {"model": "jev-1.13-free", "state": "Charged twice", "questions": CHOICE}),
             Step("--input file record", ["classify", "--questions", "choice.json", "--input", "record.json", *stub_args],
                  stub=[ok()], stdout=lambda o: lines_json(o)[0]["id"] == {"ticket": 7},
@@ -810,9 +829,9 @@ def execute(step, build_dir, work, stub):
     if step.setup:
         step.setup(build_dir)
     # Fixture files live in `work`; the CLI runs from there as `python3 <build>/<script> ...`.
-    cmd = [sys.executable, str(build_dir / step.script), *step.argv]
+    cmd, cwd = step.command(build_dir) if step.command else ([sys.executable, str(build_dir / step.script), *step.argv], work)
     started = time.monotonic()
-    proc = subprocess.run(cmd, input=step.stdin, capture_output=True, text=True, encoding="utf-8", cwd=work, env=env,
+    proc = subprocess.run(cmd, input=step.stdin, capture_output=True, text=True, encoding="utf-8", cwd=cwd, env=env,
                           timeout=step.timeout)
     elapsed = time.monotonic() - started
     time.sleep(0.05)
@@ -834,7 +853,7 @@ def execute(step, build_dir, work, stub):
                 problems.append(f"{label} check failed")
         except (ValueError, KeyError, IndexError, TypeError, OSError) as exc:
             problems.append(f"{label} check raised {type(exc).__name__}: {exc}")
-    shown = " ".join(["python3", step.script, *step.argv])
+    shown = " ".join(cmd) if step.command else " ".join(["python3", step.script, *step.argv])
     return {"step": step.name, "command": shown, "stdin": step.stdin, "env": sorted(step.env),
             "exit": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr, "seconds": round(elapsed, 2),
             "stub_requests": [{k: r[k] for k in ("path", "in_flight", "bytes", "body")} | {"headers": {

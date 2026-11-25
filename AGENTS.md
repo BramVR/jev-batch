@@ -1,4 +1,4 @@
-# jev-cli agent notes
+# jev-batch agent notes
 
 Read README.md for CLI contracts. `CLAUDE.md` is a symlink to this file.
 
