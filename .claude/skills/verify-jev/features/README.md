@@ -1,6 +1,6 @@
-# jev-cli verification map
+# jev-batch verification map
 
-The maintained source for verifying what a jev-cli user can observe. Read this index, then the feature file, then run its journey.
+The maintained source for verifying what a jev-batch user can observe. Read this index, then the feature file, then run its journey.
 
 ## Baseline preconditions
 

@@ -1,6 +1,44 @@
-# jev-cli
+# jev-batch
+
+jev-batch classifies many records with Jev System One, then scores and counts the results offline.
 
 Python 3.9+ stdlib CLI for Jev System One. No installation or dependencies. Defaults to free OpenCode `POST https://opencode.ai/zen/v1/systemone`, model `jev-1.13-free`, without authentication.
+
+## Quick start
+
+Run this in a directory that holds `jev.py`. It uses the free default and needs no key.
+
+```sh
+cat > questions.json <<'EOF'
+{
+  "schema_version": 1,
+  "questions": {
+    "topic": {
+      "type": "choice",
+      "instructions": "Pick the topic of the message.",
+      "criteria": {"billing": "Payments and charges.", "bug": "Software defect.", "other": "Anything else."}
+    }
+  }
+}
+EOF
+printf '%s\n' '{"id":"ticket-1","state":"I was charged twice this month."}' |
+  python3 jev.py classify --questions questions.json
+```
+
+It prints one JSON line with the record `id` and the full System One response.
+
+## What only jev-batch does
+
+Compared with [tumf/jev-cli](https://github.com/tumf/jev-cli), [shaharia-lab/jev-cli](https://github.com/shaharia-lab/jev-cli), and [nasrallah-al/jev-cli](https://github.com/nasrallah-al/jev-cli), checked on 2026-11-25:
+
+- The default backend is free and needs no key. All three default to TypeSafe and need a key.
+- `eval` scores saved results against hand labels with a confusion matrix and calibration buckets.
+- `summarize` counts labels offline.
+- It is one stdlib Python file with no runtime dependency. tumf needs the `mcp` package and Python 3.13.
+
+Unofficial. Not affiliated with TypeSafe.
+
+License: [MIT](LICENSE).
 
 ## Classify records
 
