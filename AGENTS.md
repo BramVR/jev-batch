@@ -30,6 +30,7 @@ When a reviewer or the operator corrects a mistake, fix it and add or update a r
 | Exit codes have one source: `EXIT_CODES` in `jev.py`, with `GATE_FALSE` and `GATE_ABSTAIN` for 10 and 11, never bare literals. Top-level and `classify` `--help` render it; README's `## Exit codes` table states it row by row. | `tests/test_cli.py::test_readme_and_help_list_the_exit_codes_the_code_returns`; formal `gate-exit` + mutants. |
 | The lowest Python in the CI matrix is the floor: `MIN_PYTHON` in `jev.py` and `verify.py`, `requires-python` in `pyproject.toml`, the CI `install` job, and the `Python X.Y+` line in README and verify-jev SKILL.md. Below it, both scripts exit 1 with a version message. | `tests/test_cli.py::test_documented_python_floor_is_the_lowest_ci_version`; CI job `below-floor` runs both on 3.8; CI job `install` checks the installed command on the floor. |
 | The project is jev-batch. Pre-rename names (`OLD_NAMES` in `tests/test_repo.py`) stay only in CHANGELOG.md and docs/demo.md history and in links to other owners' repos. | `tests/test_repo.py::test_old_project_names_appear_only_in_history_and_competitor_links`; fails with 12 hits on the pre-rename tree 7ad9b35. |
+| No dependencies, runtime or dev: every repo Python file imports only the standard library and repo modules. | `tests/test_repo.py::test_python_imports_only_the_standard_library` probes each import in `python -I -S`, so an import inside a handler fails too; `scripts/check_install.py` checks the installed package lists no requirements. |
 
 ## Exceptions
 
