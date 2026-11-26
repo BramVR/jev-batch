@@ -144,11 +144,11 @@ Flags combine; the gate passes, with exit 0, only when no flag fails. Values mus
 
 | Code | Meaning |
 | --- | --- |
-| 0 | success; with a classify gate, the gate passed |
-| 1 | error: bad input or questions file, missing credentials, failed request, or an unreadable gated answer |
+| 0 | success; with a classify or ask gate, the gate passed |
+| 1 | error: bad input or questions file, missing credentials, failed request, or an unreadable gated or --value answer |
 | 2 | usage error: unknown flag, missing required flag, or a flag value out of range |
-| 10 | classify gate false: --fail-under, --expect, or --min-confidence failed |
-| 11 | classify abstain: noul inside --abstain-band |
+| 10 | classify or ask gate false: --fail-under, --expect, or --min-confidence failed |
+| 11 | classify or ask abstain: noul inside --abstain-band |
 | 130 | interrupted by Ctrl-C |
 
 ## Cache responses

@@ -29,8 +29,17 @@ RESPONSE = {
 }
 
 
+def leaf_commands(parser, path=()):
+    """Every runnable command path, nested ones included, such as ("ask", "choice"), mapped to its parser."""
+    subs = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
+    if not subs:
+        return {path: parser}
+    return {leaf: sub for name, child in subs[0].choices.items()
+            for leaf, sub in leaf_commands(child, (*path, name)).items()}
+
+
 class CliTests(unittest.TestCase):
-    def run_cli(self, data, command="batch", response=RESPONSE, extra=(), env=None, questions=QUESTIONS):
+    def run_argv(self, argv, data="", response=RESPONSE, env=None):
         sent = []
 
         def http(request, timeout):
@@ -40,16 +49,19 @@ class CliTests(unittest.TestCase):
                 raise body
             return contextlib.closing(io.BytesIO(body if isinstance(body, bytes) else json.dumps(body).encode()))
 
+        out, err = io.StringIO(), io.StringIO()
+        with patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-only", **(env or {})}, clear=True), \
+             patch("sys.stdin", io.StringIO(data)), \
+             patch("urllib.request.urlopen", side_effect=http), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = jev.main(argv)
+        return code, out.getvalue(), err.getvalue(), sent
+
+    def run_cli(self, data, command="batch", response=RESPONSE, extra=(), env=None, questions=QUESTIONS):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "q.json"
             path.write_text(questions if isinstance(questions, str) else json.dumps(questions), encoding="utf-8")
-            out, err = io.StringIO(), io.StringIO()
-            with patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-only", **(env or {})}, clear=True), \
-                 patch("sys.stdin", io.StringIO(data)), \
-                 patch("urllib.request.urlopen", side_effect=http), \
-                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = jev.main([command, "--questions", str(path), *extra])
-            return code, out.getvalue(), err.getvalue(), sent
+            return self.run_argv([command, "--questions", str(path), *extra], data, response, env)
 
     def test_batch_preserves_ids_probabilities_metadata_and_request(self):
         records = [{"id": "session-α", "state": {"text": "hello"}},
@@ -509,19 +521,23 @@ class CliTests(unittest.TestCase):
             self.assertIn("the following arguments are required: --questions", run.stderr)
 
     def test_each_command_rejects_flags_it_does_not_declare(self):
-        commands = next(a for a in jev.build_parser()._actions if isinstance(a, argparse._SubParsersAction)).choices
+        commands = leaf_commands(jev.build_parser())
         declared = {name: {flag for action in sub._actions for flag in action.option_strings}
                     for name, sub in commands.items()}
-        required = {name: [arg for action in sub._actions if action.required for arg in (action.option_strings[0], "x")]
+        # Each required positional gets "x", each required flag "k=x", which also parses as -o KEY=DESCRIPTION.
+        required = {name: [arg for action in sub._actions if action.required
+                           for arg in ((action.option_strings[0], "k=x") if action.option_strings else ("x",))]
                     for name, sub in commands.items()}
         every = set().union(*declared.values())
-        self.assertIn("--concurrency", every - declared["classify"])
+        self.assertIn("--concurrency", every - declared[("classify",)])
+        self.assertLessEqual({("ask", "noul"), ("ask", "choice"), ("ask", "score")}, set(commands))
+        self.assertLessEqual({"-o", "-l", "--expect", "--min-confidence"}, every - declared[("ask", "noul")])
         for name, flags in declared.items():
             for flag in sorted(every - flags):
                 with patch("sys.stdin", io.StringIO("")), patch("urllib.request.urlopen", side_effect=AssertionError), \
                      patch("jev.api_key", side_effect=AssertionError), contextlib.redirect_stderr(io.StringIO()) as err, \
                      self.assertRaises(SystemExit) as exit_:
-                    jev.main([name, *required[name], flag, "1"])
+                    jev.main([*name, *required[name], flag, "1"])
                 self.assertEqual(exit_.exception.code, 2, (name, flag))
                 self.assertIn(f"unrecognized arguments: {flag}", err.getvalue(), (name, flag))
 
@@ -904,7 +920,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual((code, err, len(sent)), (jev.GATE_FALSE, "", 2))
         self.assertEqual(json.loads(out)["answers"]["route"]["choice"], "a")
 
-    def test_only_classify_takes_gate_flags(self):
+    def test_batch_eval_and_summarize_take_no_gate_flags(self):
         gates = (("--fail-under", "0.5"), ("--expect", "a"), ("--min-confidence", "0.5"), ("--abstain-band", "0.4,0.6"))
         commands = {"batch": ["--questions", "q.json"], "eval": ["--questions", "q.json", "--labels", "l.jsonl"],
                     "summarize": []}
@@ -924,11 +940,166 @@ class CliTests(unittest.TestCase):
         rows = re.findall(r"^\| `?(\d+)`? \| (.*?) \|$", section[1], re.MULTILINE)
         self.assertEqual(rows, [(str(code), meaning) for code, meaning in jev.EXIT_CODES.items()],
                          "README exit-code table must match jev.EXIT_CODES row by row")
-        for argv in (["--help"], ["classify", "--help"]):
+        for argv in (["--help"], ["classify", "--help"], ["ask", "noul", "--help"]):
             result = subprocess.run([sys.executable, str(ROOT / "jev.py"), *argv], capture_output=True, encoding="utf-8")
             self.assertEqual(result.returncode, 0)
             for code, meaning in jev.EXIT_CODES.items():
                 self.assertIn(f"{code:<5}{meaning}", result.stdout, argv)
+
+
+    # ask: (sub-command flags, the question README says each type builds). The question text is "Q?".
+    ASK = {
+        "noul": ([], {"type": "noul", "instructions": "Q?"}),
+        "choice": (["-o", "a=Pay = money", "-o", "b="], {"type": "choice", "instructions": "Q?",
+                                                         "criteria": {"a": "Pay = money", "b": ""}}),
+        "score": (["-l", "low", "-l", "high"], {"type": "score", "instructions": "Q?", "criteria": ["low", "high"]}),
+    }
+    ASK_ANSWERS = {"noul": {"type": "noul", "noul": 0.875},
+                   "choice": {"type": "choice", "choice": "a", "confidence": 0.75, "probabilities": {"a": 0.75, "b": 0.25}},
+                   "score": {"type": "score", "score": 1, "legend": "high", "confidence": 0.5}}
+
+    def ask(self, kind, *extra, data="", response=None, env=None):
+        response = response or self.gate_response("answer", **self.ASK_ANSWERS[kind])
+        return self.run_argv(["ask", kind, "Q?", *self.ASK[kind][0], *extra], data, response, env)
+
+    def test_ask_sends_and_prints_what_classify_does_for_the_same_question_and_record(self):
+        for kind, (_, question) in self.ASK.items():
+            for state in ("Charged twice", " padded\r\n ünï ✓\n"):
+                with tempfile.TemporaryDirectory() as tmp:
+                    state_file = Path(tmp) / "state.txt"
+                    with state_file.open("w", encoding="utf-8", newline="") as handle:
+                        handle.write(state)
+                    sources = {"--state": (["--state", state], ""), "--state-file": (["--state-file", str(state_file)], ""),
+                               "stdin": ([], state)}
+                    response = self.gate_response("answer", **self.ASK_ANSWERS[kind])
+                    classified = self.run_cli(json.dumps({"id": None, "state": state}), "classify", response,
+                                              questions={"answer": question})
+                    for source, (flags, data) in sources.items():
+                        with self.subTest(kind=kind, state=state, source=source):
+                            code, out, err, sent = self.ask(kind, *flags, data=data)
+                            self.assertEqual((code, out, err), classified[:3])
+                            self.assertEqual(json.loads(sent[0][0].data),
+                                             {"model": jev.DEFAULT_MODEL, "state": state, "questions": {"answer": question}})
+                            (request, timeout), = sent
+                            (expected, expected_timeout), = classified[3]
+                            self.assertEqual((request.full_url, request.data, request.header_items(), timeout),
+                                             (expected.full_url, expected.data, expected.header_items(), expected_timeout))
+
+    def test_ask_stdin_is_sent_unchanged_by_the_process(self):
+        state = "line one\r\nline two\r\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "q.json"
+            path.write_text(json.dumps({"answer": self.ASK["noul"][1]}), encoding="utf-8")
+            runs = [subprocess.run([sys.executable, str(ROOT / "jev.py"), *argv, "--dry-run"], capture_output=True,
+                                   input=data.encode("utf-8"), timeout=10)
+                    for argv, data in ((["ask", "noul", "Q?"], state),
+                                       (["classify", "--questions", str(path)], json.dumps({"id": None, "state": state})))]
+        self.assertEqual([(r.returncode, r.stderr) for r in runs], [(0, b"")] * 2)
+        self.assertEqual(runs[0].stdout, runs[1].stdout)
+
+    def test_ask_value_prints_only_the_answer_field(self):
+        for kind, expected in (("noul", "0.875\n"), ("choice", "a\n"), ("score", "1\n")):
+            with self.subTest(kind=kind):
+                self.assertEqual(self.ask(kind, "--value", data="x")[:3], (0, expected, ""))
+        broken = [("noul", {"type": "noul"}, "numeric noul"), ("noul", {"type": "noul", "noul": True}, "numeric noul"),
+                  ("choice", {"type": "choice", "choice": 1}, "string choice"),
+                  ("score", {"type": "score", "score": "1"}, "numeric score")]
+        for kind, answer, missing in broken:
+            with self.subTest(answer=answer):
+                code, out, err, sent = self.ask(kind, "--value", data="x", response=self.gate_response("answer", **answer))
+                self.assertEqual((code, out, len(sent)), (1, "", 1))
+                self.assertEqual(err, f"jev: cannot print --value; answer 'answer' has no {missing}\n")
+
+    def test_ask_dry_run_sends_nothing_reads_no_key_and_ignores_value(self):
+        typesafe = ["--base-url", "https://api.typesafe.ai/v1", "--model", "jev-1.14.0"]
+        for kind, (_, question) in self.ASK.items():
+            with self.subTest(kind=kind), patch("jev.api_key") as key:
+                code, out, err, sent = self.ask(kind, "--dry-run", "--value", *typesafe, data="Charged twice")
+                _, expected, _, _ = self.run_cli('{"id":null,"state":"Charged twice"}', "classify", AssertionError,
+                                                 ["--dry-run", *typesafe], questions={"answer": question})
+                self.assertEqual((code, err, sent), (0, "", []))
+                self.assertEqual(out, expected)
+                self.assertTrue(json.loads(out)["dry_run"])
+                key.assert_not_called()
+
+    def test_ask_empty_state_exits_1_before_credentials_or_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = Path(tmp) / "empty.txt"
+            empty.write_text("", encoding="utf-8")
+            for source in ([], ["--state", ""], ["--state-file", str(empty)]):
+                for dry_run in ([], ["--dry-run"]):
+                    with self.subTest(source=source, dry_run=dry_run), patch("jev.api_key") as key:
+                        code, out, err, sent = self.ask("noul", *source, *dry_run, "--base-url",
+                                                        "https://api.typesafe.ai/v1", response=AssertionError)
+                        self.assertEqual((code, out, sent), (1, "", []))
+                        self.assertEqual(err, "jev: state is empty; pass --state TEXT, --state-file PATH, or text on stdin\n")
+                        key.assert_not_called()
+
+    def test_ask_usage_errors(self):
+        cases = [
+            (["ask", "choice", "Q?"], "the following arguments are required: -o"),
+            (["ask", "score", "Q?"], "the following arguments are required: -l"),
+            (["ask", "noul"], "the following arguments are required: QUESTION"),
+            (["ask"], "the following arguments are required"),
+            (["ask", "noul", "Q?", "-o", "a=A"], "unrecognized arguments: -o"),
+            (["ask", "noul", "Q?", "-l", "low"], "unrecognized arguments: -l"),
+            (["ask", "noul", "Q?", "--state", "x", "--state-file", "x.txt"], "not allowed with argument --state"),
+            (["ask", "choice", "Q?", "-o", "=A"], "is not KEY=DESCRIPTION"),
+            (["ask", "choice", "Q?", "-o", "A"], "is not KEY=DESCRIPTION"),
+            (["ask", "choice", "Q?", "-o", "a=A", "-o", "a=B"], "argument -o: KEY 'a' given twice"),
+            (["ask", "noul", "Q?", "--questions", "q.json"], "unrecognized arguments: --questions"),
+            (["ask", "noul", "Q?", "--chunk-tokens", "100"], "unrecognized arguments: --chunk-tokens"),
+            (["ask", "noul", "Q?", "--question", "answer"], "unrecognized arguments: --question"),
+        ]
+        for argv, message in cases:
+            with self.subTest(argv=argv):
+                code, err = self.usage_error(argv)
+                self.assertEqual(code, 2)
+                self.assertIn(message, err)
+
+    def test_ask_takes_only_the_gate_flags_that_fit_its_type(self):
+        gates = {"--fail-under": "0.5", "--expect": "a", "--min-confidence": "0.5", "--abstain-band": "0.4,0.6"}
+        fits = {"noul": {"--fail-under", "--abstain-band"}, "choice": {"--expect", "--min-confidence"},
+                "score": {"--min-confidence"}}
+        for kind, taken in fits.items():
+            for flag, value in gates.items():
+                argv = ["ask", kind, "Q?", *self.ASK[kind][0], flag, value]
+                with self.subTest(kind=kind, flag=flag):
+                    if flag in taken:
+                        code, _, err, sent = self.ask(kind, flag, value, data="x")
+                        self.assertEqual((err, len(sent)), ("", 1))
+                        self.assertIn(code, (0, jev.GATE_FALSE, jev.GATE_ABSTAIN))
+                    else:
+                        code, err = self.usage_error(argv)
+                        self.assertEqual(code, 2)
+                        self.assertIn(f"unrecognized arguments: {flag}", err)
+
+    def test_ask_gate_exit_codes_with_and_without_value(self):
+        noul = lambda value: self.gate_response("answer", type="noul", noul=value)
+        choice = self.gate_response("answer", type="choice", choice="a", confidence=0.75)
+        score = self.gate_response("answer", type="score", score=1, confidence=0.5)
+        table = [
+            ("noul", noul(0.2), ["--fail-under", "0.5"], jev.GATE_FALSE, "0.2\n"),
+            ("noul", noul(0.5), ["--fail-under", "0.5"], 0, "0.5\n"),
+            ("noul", noul(0.45), ["--abstain-band", "0.4,0.6", "--fail-under", "0.5"], jev.GATE_ABSTAIN, "0.45\n"),
+            ("choice", choice, ["--expect", "b"], jev.GATE_FALSE, "a\n"),
+            ("choice", choice, ["--expect", "a", "--min-confidence", "0.75"], 0, "a\n"),
+            ("score", score, ["--min-confidence", "0.6"], jev.GATE_FALSE, "1\n"),
+        ]
+        for kind, response, flags, expected, value in table:
+            for show in ([], ["--value"]):
+                with self.subTest(kind=kind, flags=flags, show=show):
+                    code, out, err, sent = self.ask(kind, *flags, *show, data="x", response=response)
+                    self.assertEqual((code, err, len(sent)), (expected, "", 1))
+                    self.assertEqual(out, value if show else json.dumps({"id": None, **response}) + "\n")
+
+    def test_ask_expect_outside_the_options_fails_before_credentials_or_requests(self):
+        for dry_run in ([], ["--dry-run"]):
+            with self.subTest(dry_run=dry_run), patch("jev.api_key") as key:
+                code, out, err, sent = self.ask("choice", "--expect", "c", *dry_run, "--base-url",
+                                                "https://api.typesafe.ai/v1", data="x", response=AssertionError)
+                self.assertEqual((code, out, err, sent), (1, "", "jev: --expect 'c' is not a criteria key of 'answer'\n", []))
+                key.assert_not_called()
 
 
 if __name__ == "__main__":
