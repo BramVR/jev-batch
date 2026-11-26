@@ -80,7 +80,8 @@ def lint(path, text):
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
     paths = [Path(a) for a in args] or [Path(p) for p in subprocess.run(
-        ["git", "-C", str(ROOT), "ls-files", "*.py"], capture_output=True, encoding="utf-8", check=True).stdout.split()]
+        ["git", "-C", str(ROOT), "ls-files", "-z", "--cached", "--others", "--exclude-standard", "*.py"],
+        capture_output=True, encoding="utf-8", check=True).stdout.split("\0") if p]
     errors = []
     for path in paths:
         errors += lint(path, (ROOT / path).read_text(encoding="utf-8"))
