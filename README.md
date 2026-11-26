@@ -101,7 +101,7 @@ Each request is retried up to `--retries` times (default 3, max 10) after HTTP 4
 
 On the first invalid record or exhausted API failure, exit 1; previous successful JSONL lines remain valid and flushed. Stderr names the first line without output, for example `jev: batch stopped at line 2; System One HTTP 503; gave up after 4 attempts`. It never includes HTTP bodies. `invalid JSON record` means the input line itself failed to parse, while a response that is not UTF-8 JSON with finite numbers reads `System One returned invalid JSON`. An invalid line is never sent, and nothing after it is read. With concurrency above 1, requests for up to `--concurrency - 1` later lines may already be running when an earlier line fails. Those requests finish or time out, pending retries stop, and their results are discarded, so resuming from the reported line sends them again, unless `--cache` is on and they already stored an entry.
 
-Ctrl-C works the same way. It exits 130 with `batch stopped at line N; interrupted`, stops new requests and pending retries, and waits for already-running requests to finish or reach their timeout. Resume from line N explicitly, or rerun the full input with `--cache` so finished records send nothing. CLI argument errors exit 2. Help and successful runs exit 0.
+Ctrl-C works the same way. It exits 130 with `batch stopped at line N; interrupted`, stops new requests and pending retries, and waits for already-running requests to finish or reach their timeout. Resume from line N explicitly, or rerun the full input with `--cache` so finished records send nothing. [Exit codes](#exit-codes) lists every code.
 
 ### Dry run
 
@@ -122,6 +122,34 @@ Prices were read 2026-11-14 as input USD per million tokens. The source pages sh
 - TypeSafe ([models](https://docs.typesafe.ai/models)) lists `jev-1.14.0`, `jev-1.13.0`, `jev-latest`, and `jev-preview` at 0.042, for the HTTPS origin only.
 
 `--dry-run` ignores `--cache`: it reads and writes no entry and prices every record as if sent, so the estimate is an upper bound for a cached rerun. Output tokens are not estimated. Both sources list them as free. Any other host or model reports price status `unknown` and a `null` price and cost, never a guess. Image `assets` count toward `request_bytes` but are excluded from token estimates. Such records are flagged `assets_not_estimated`, and the run's cost is `null`.
+
+### Gate on an answer
+
+`classify` can turn one answer into an exit code, so a script branches without parsing JSON:
+
+```sh
+printf '%s\n' '{"id":"ticket-1","state":"Charged twice"}' |
+  python3 jev.py classify --questions questions.json --fail-under 0.5 --abstain-band 0.4,0.6
+```
+
+- `--question NAME` picks the question to gate. It may be omitted when the mapping holds one question.
+- `--fail-under P` gates a Noul answer: `noul < P` exits 10, so `noul` equal to `P` passes.
+- `--expect KEY` gates a Choice answer: any winner other than `KEY` exits 10. `KEY` must be a `criteria` key.
+- `--min-confidence C` gates a Choice or Score answer: `confidence < C` exits 10.
+- `--abstain-band LO,HI` gates a Noul answer: `LO <= noul <= HI` exits 11. Both ends are included, and abstain wins over every other gate flag.
+
+Flags combine; the gate passes, with exit 0, only when no flag fails. Values must be numbers in [0, 1], and the band needs `LO <= HI`. Anything else exits 2 as a usage error. A gate flag that does not fit the question type, an `--expect` key outside `criteria`, an unknown `--question`, or gate flags on a mapping of several questions without `--question` exit 1 before credentials are read or any request is sent, in a dry run too. The full response is always printed before the gate exit. An answer without the field a flag reads, such as a missing or boolean `noul`, is printed and then exits 1. A chunked record is gated on its aggregated answer. `--dry-run` validates the gate flags, evaluates no gate, and exits 0. `batch` takes no gate flags.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | success; with a classify gate, the gate passed |
+| 1 | error: bad input or questions file, missing credentials, failed request, or an unreadable gated answer |
+| 2 | usage error: unknown flag, missing required flag, or a flag value out of range |
+| 10 | classify gate false: --fail-under, --expect, or --min-confidence failed |
+| 11 | classify abstain: noul inside --abstain-band |
+| 130 | interrupted by Ctrl-C |
 
 ## Cache responses
 
@@ -296,7 +324,7 @@ python3 scripts/check_install.py
 
 Tests mock HTTP at the CLI boundary, checking request shape/auth, complete responses, failures, retries and backoff, the concurrency bound, partial batch output, and credential selection. Eval tests check the example fixture's exact metrics through a fresh process, edge cases, and that eval sends nothing and reads no credentials. No live API credential is required for tests. Summarize tests run the CLI on synthetic result files.
 
-Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI and the session demo against a loopback System One stub, with an opt-in `--live` journey of six synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, retry policy and backoff, batch order, window, and concurrency invariants, question-file versioning, response cache identity and resume, and demo redaction over bounded inputs, and proves each check can fail on a broken `jev.py` or demo script:
+Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI and the session demo against a loopback System One stub, with an opt-in `--live` journey of six synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, retry policy and backoff, batch order, window, and concurrency invariants, question-file versioning, response cache identity and resume, classify gate exit codes, and demo redaction over bounded inputs, and proves each check can fail on a broken `jev.py` or demo script:
 
 ```sh
 python3 .claude/skills/verify-jev/verify.py run

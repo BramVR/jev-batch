@@ -57,6 +57,23 @@ PRICES = {
     **{("api.typesafe.ai", model): ("0.042", TYPESAFE_PRICES)
        for model in ("jev-1.14.0", "jev-1.13.0", "jev-latest", "jev-preview")},
 }
+GATE_FALSE = 10
+GATE_ABSTAIN = 11
+EXIT_CODES = {
+    0: "success; with a classify gate, the gate passed",
+    1: "error: bad input or questions file, missing credentials, failed request, or an unreadable gated answer",
+    2: "usage error: unknown flag, missing required flag, or a flag value out of range",
+    GATE_FALSE: "classify gate false: --fail-under, --expect, or --min-confidence failed",
+    GATE_ABSTAIN: "classify abstain: noul inside --abstain-band",
+    130: "interrupted by Ctrl-C",
+}
+# Which question types each gate flag can gate.
+GATE_FITS = {
+    "fail_under": ("noul",),
+    "abstain_band": ("noul",),
+    "expect": ("choice",),
+    "min_confidence": ("choice", "score"),
+}
 TOKEN_METHOD = ("heuristic: ceil(bytes / 4) over the exact UTF-8 request body classify sends "
                 "(ASCII-escaped JSON), without assets; not a tokenizer count")
 
@@ -356,6 +373,61 @@ def classify(record, questions, key, backend, timeout, retries=0, stop=None, cac
     return respond(record["id"], request, timeout, retries, stop or threading.Event(), cache)
 
 
+@dataclass(frozen=True)
+class Gate:
+    question: str
+    fail_under: object = None
+    abstain_band: object = None
+    expect: object = None
+    min_confidence: object = None
+
+
+def build_gate(args, questions):
+    if getattr(args, "question", None) is not None and args.question not in questions:
+        raise JevError(f"--question {args.question!r} is not in the questions file")
+    flags = {name: getattr(args, name) for name in GATE_FITS if getattr(args, name, None) is not None}
+    if not flags:
+        return None
+    if args.question is None and len(questions) > 1:
+        raise JevError("gate flags need --question when the questions file has several questions")
+    name = args.question if args.question is not None else next(iter(questions))
+    question = questions[name]
+    for flag in flags:
+        if question["type"] not in GATE_FITS[flag]:
+            raise JevError(f"--{flag.replace('_', '-')} gates {' or '.join(GATE_FITS[flag])} questions; "
+                           f"{name!r} is {question['type']}")
+    criteria = question.get("criteria")
+    if "expect" in flags and not (isinstance(criteria, dict) and args.expect in criteria):
+        raise JevError(f"--expect {args.expect!r} is not a criteria key of {name!r}")
+    return Gate(name, **flags)
+
+
+def gate_exit(gate, answers):
+    answer = answers.get(gate.question)
+
+    def read(field, kinds):
+        value = answer.get(field) if isinstance(answer, dict) else None
+        if isinstance(value, bool) or not isinstance(value, kinds):
+            kind = "string" if kinds is str else "numeric"
+            raise JevError(f"cannot evaluate the gate; answer {gate.question!r} has no {kind} {field}")
+        return value
+
+    # Read every field a set flag needs first, so a missing one exits 1 whichever flag would decide.
+    noul = read("noul", (int, float)) if (gate.abstain_band, gate.fail_under) != (None, None) else None
+    choice = read("choice", str) if gate.expect is not None else None
+    confidence = read("confidence", (int, float)) if gate.min_confidence is not None else None
+    # Abstain wins, so it is checked before any pass or fail.
+    if gate.abstain_band is not None and gate.abstain_band[0] <= noul <= gate.abstain_band[1]:
+        return GATE_ABSTAIN
+    if gate.fail_under is not None and noul < gate.fail_under:
+        return GATE_FALSE
+    if gate.expect is not None and choice != gate.expect:
+        return GATE_FALSE
+    if gate.min_confidence is not None and confidence < gate.min_confidence:
+        return GATE_FALSE
+    return 0
+
+
 def utf8_tokens(text):
     # Upper bound for byte-level BPE tokenizers: every token covers at least one UTF-8 byte.
     return len(text.encode("utf-8"))
@@ -642,6 +714,30 @@ def summarize(lines, question=None, questions=None):
             "confidence": confidence, "diagnostics": diagnostics}
 
 
+def unit_interval(text):
+    try:
+        value = float(text)
+    except ValueError:
+        value = math.nan
+    if not 0 <= value <= 1:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number in [0, 1]")
+    return value
+
+
+def band(text):
+    parts = text.split(",")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError(f"{text!r} is not LO,HI")
+    low, high = map(unit_interval, parts)
+    if low > high:
+        raise argparse.ArgumentTypeError(f"{text!r} has LO above HI")
+    return low, high
+
+
+def exit_code_help():
+    return "exit codes:\n" + "\n".join(f"  {code:<5}{meaning}" for code, meaning in EXIT_CODES.items())
+
+
 def build_parser():
     questions_help = (f"JSON questions file: raw API mapping or "
                       f"{{schema_version: {'|'.join(map(str, SCHEMA_VERSIONS))}, questions}}")
@@ -660,10 +756,26 @@ def build_parser():
                          help=f"split string state so each request stays within N estimated tokens "
                               f"(max {QUESTION_TOKEN_LIMIT}); choice questions only")
 
-    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    gating = argparse.ArgumentParser(add_help=False)
+    gating.add_argument("--question", metavar="NAME", help="question to gate; default the only question")
+    gating.add_argument("--fail-under", type=unit_interval, metavar="P",
+                        help=f"exit {GATE_FALSE} when noul < P; P in [0, 1]")
+    gating.add_argument("--expect", metavar="KEY",
+                        help=f"exit {GATE_FALSE} when the choice is not KEY, a criteria key")
+    gating.add_argument("--min-confidence", type=unit_interval, metavar="C",
+                        help=f"exit {GATE_FALSE} when {' or '.join(GATE_FITS['min_confidence'])} confidence < C; "
+                             f"C in [0, 1]")
+    gating.add_argument("--abstain-band", type=band, metavar="LO,HI",
+                        help=f"exit {GATE_ABSTAIN} when LO <= noul <= HI, ends included; LO and HI in [0, 1], "
+                             f"LO <= HI; abstain wins over the other gate flags")
+
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False, epilog=exit_code_help(),
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True, metavar="{classify,batch,eval,summarize}")
-    classify_ = commands.add_parser("classify", allow_abbrev=False, parents=[sending], help="classify one {id,state} record")
+    classify_ = commands.add_parser("classify", allow_abbrev=False, parents=[sending, gating],
+                                    help="classify one {id,state} record", epilog=exit_code_help(),
+                                    formatter_class=argparse.RawDescriptionHelpFormatter)
     classify_.add_argument("--input", type=Path, help="one {id,state} JSON record; default stdin")
     classify_.set_defaults(run=run_send)
     batch_ = commands.add_parser("batch", allow_abbrev=False, parents=[sending], help="classify {id,state} JSONL from stdin, in order")
@@ -705,6 +817,7 @@ def run_send(args):
     if args.command == "batch" and not 1 <= args.concurrency <= MAX_CONCURRENCY:
         raise JevError(f"concurrency must be between 1 and {MAX_CONCURRENCY}")
     questions = load_questions(args.questions)
+    gate = build_gate(args, questions)
     if args.chunk_tokens is not None:
         check_chunk_questions(questions, args.chunk_tokens)
     backend = Backend(args.base_url, args.model)
@@ -737,12 +850,13 @@ def run_send(args):
     raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
     record = read_json(raw)
     if args.chunk_tokens is None:
-        emit(classify(record, questions, key, backend, args.timeout, args.retries, cache=cache))
+        result = classify(record, questions, key, backend, args.timeout, args.retries, cache=cache)
     else:
         spans = chunk_plan(record, questions, args.chunk_tokens)
-        emit(run_chunks(record, spans, questions, key, backend, args.timeout, args.chunk_tokens,
-                        args.retries, threading.Event(), cache))
-    return 0
+        result = run_chunks(record, spans, questions, key, backend, args.timeout, args.chunk_tokens,
+                            args.retries, threading.Event(), cache)
+    emit(result)
+    return gate_exit(gate, result["answers"]) if gate else 0
 
 
 def run_eval(args):
