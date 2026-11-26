@@ -2,6 +2,8 @@
 
 ## 0.1.0
 
+- Add `classify` gate flags `--fail-under`, `--expect`, `--min-confidence`, and `--abstain-band LO,HI` (with `--question NAME`): the full response still prints, then the exit is 10 when the gate is false and 11 when Noul falls inside the inclusive abstain band, which wins over the other flags; `--help` and a new README table list every exit code.
+
 - Add `--version`, which prints `jev.py 0.1.0` from a checkout; the User-Agent takes its version from the same constant.
 
 - Add `pyproject.toml`, so `pip install`, `pipx install`, or `uv tool install` gives a `jev-batch` command with no runtime dependencies; there is no `jev` command.

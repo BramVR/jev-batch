@@ -33,7 +33,7 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "984ffdebb0b64ba65d0451161c544eaaaa3c15d8",
+    "jev.py": "0a5c0beeec287e51d0feca60e6470e82b75ac1bc",
     "scripts/demo_sessions.py": "85993fe7c2e4d7f521fd2e2e5f3d7382f5a1fb1b",
 }
 KEY = "sentinel-key-not-real"
@@ -1700,6 +1700,135 @@ def check_chunk(c, depth):
     check_chunk_guards(c)
 
 
+# Gate: classify's exit code over every combination of answer and gate flags in a bounded grid, against README's
+# rule restated: abstain (LO <= noul <= HI, ends included) wins, then any failing flag exits 10, else 0. An answer
+# without the field a set flag reads exits 1. The full response is printed in every case.
+
+GATE_NOULS = [0, 0.25, 0.3999, 0.4, 0.4999, 0.5, 0.5001, 0.6, 0.6001, 1, ABSENT, True, "0.5"]
+GATE_FAIL_UNDER = [None, "0", "0.5", "1"]
+GATE_BANDS = [None, "0.4,0.6", "0.5,0.5", "0,1", "0,0"]
+GATE_CHOICES = ["a", "b", ABSENT]
+GATE_CONFIDENCES = [0, 0.7499, 0.75, 1, ABSENT, False]
+GATE_EXPECT = [None, "a", "b"]
+GATE_MIN_CONFIDENCE = [None, "0", "0.75", "1"]
+GATE_QUESTIONS = {"noul": {"n": NOUL}, "choice": {"c": CHOICE}, "score": {"s": {"type": "score", "criteria": ["lo", "hi"]}},
+                  "mixed": {"n": NOUL, "c": CHOICE}}
+
+
+def is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def gate_oracle(answer, fail_under=None, band=None, expect=None, min_confidence=None):
+    if all(flag is None for flag in (fail_under, band, expect, min_confidence)):
+        return 0
+    noul, choice, confidence = (answer.get(k, ABSENT) for k in ("noul", "choice", "confidence"))
+    if band is not None:
+        if not is_number(noul):
+            return 1
+        low, high = map(float, band.split(","))
+        if low <= noul <= high:
+            return 11
+    verdicts = []
+    for flag, value, valid, fails in ((fail_under, noul, is_number(noul), lambda: noul < float(fail_under)),
+                                      (expect, choice, isinstance(choice, str), lambda: choice != expect),
+                                      (min_confidence, confidence, is_number(confidence),
+                                       lambda: confidence < float(min_confidence))):
+        if flag is not None:
+            if not valid:
+                return 1
+            verdicts.append(fails())
+    return 10 if any(verdicts) else 0
+
+
+def gate_cases():
+    for noul, fail_under, band in itertools.product(GATE_NOULS, GATE_FAIL_UNDER, GATE_BANDS):
+        yield "noul", "n", {"type": "noul", "noul": noul}, {"fail_under": fail_under, "band": band}
+    for choice, confidence, expect, min_confidence in itertools.product(GATE_CHOICES, GATE_CONFIDENCES, GATE_EXPECT,
+                                                                        GATE_MIN_CONFIDENCE):
+        yield "choice", "c", {"type": "choice", "choice": choice, "confidence": confidence}, \
+            {"expect": expect, "min_confidence": min_confidence}
+    for confidence, min_confidence in itertools.product(GATE_CONFIDENCES, GATE_MIN_CONFIDENCE):
+        yield "score", "s", {"type": "score", "score": 1, "confidence": confidence}, {"min_confidence": min_confidence}
+    for noul, fail_under in itertools.product(GATE_NOULS[:10], GATE_FAIL_UNDER[1:]):
+        yield "mixed", "n", {"type": "noul", "noul": noul}, {"fail_under": fail_under}
+
+
+GATE_FLAGS = {"fail_under": "--fail-under", "band": "--abstain-band", "expect": "--expect",
+              "min_confidence": "--min-confidence"}
+
+
+def check_gate_exit(c):
+    for kind, name, answer, flags in gate_cases():
+        c.cases += 1
+        answer = {k: v for k, v in answer.items() if v is not ABSENT}
+        response = {"model": "m", "answers": {name: answer}, "usage": {"input_tokens": 1}}
+        argv = ["classify", "--questions", c.questions_file(GATE_QUESTIONS[kind]), "--retries", "0"]
+        argv += ["--question", name] if kind == "mixed" else []
+        for flag, value in flags.items():
+            argv += [GATE_FLAGS[flag], value] if value is not None else []
+        case = f"gate {kind} answer={answer} {argv[5:]}"
+        run = drive(c.jev, argv, '{"id":"g","state":"x"}', respond=lambda i, r: json.dumps(response).encode())
+        if not c.clean_exit("gate-clean-exit", case, run):
+            continue
+        expected = gate_oracle(answer, **flags)
+        printed = run.stdout.endswith("\n") and same(json.loads(run.stdout), {"id": "g", **response})
+        if run.code != expected or not printed or len(run.requests) != 1:
+            c.fail("gate-exit", case, f"exit {run.code}, expected {expected}; stdout {run.stdout[:80]!r}; "
+                                      f"{len(run.requests)} requests")
+
+
+# Gate flags that cannot fit the question file: exit 1 before credentials or any request, in a dry run too.
+GATE_MISFITS = [
+    ("noul", ["--expect", "a"]), ("noul", ["--min-confidence", "0.5"]), ("choice", ["--fail-under", "0.5"]),
+    ("choice", ["--abstain-band", "0.4,0.6"]), ("score", ["--expect", "lo"]), ("score", ["--fail-under", "0.5"]),
+    ("score", ["--abstain-band", "0,1"]), ("choice", ["--expect", "c"]), ("choice", ["--expect", "A"]),
+    ("mixed", ["--fail-under", "0.5"]), ("mixed", ["--min-confidence", "0.5"]),
+    ("mixed", ["--question", "x", "--fail-under", "0.5"]), ("mixed", ["--question", "c", "--fail-under", "0.5"]),
+    ("mixed", ["--question", "n", "--expect", "a"]), ("noul", ["--question", "c", "--fail-under", "0.5"]),
+]
+GATE_FITS_OK = [("noul", ["--fail-under", "0.5", "--abstain-band", "0.4,0.6"]), ("choice", ["--expect", "b"]),
+                ("score", ["--min-confidence", "1"]), ("mixed", ["--question", "c", "--expect", "a"])]
+GATE_BAD_VALUES = ["-0.1", "1.0001", "nan", "inf", "-inf", "x", "", "1e999"]
+GATE_BAD_BANDS = ["0.6,0.4", "0.4", "0.4,", ",0.6", "0.1,0.2,0.3", "a,b", "0.4,1.1", "-0.1,0.5", "nan,0.5", "0.5,inf"]
+
+
+def check_gate_validation(c):
+    typesafe = ["--base-url", "https://api.typesafe.ai/v1", "--model", "jev-1.14.0"]
+    env = {"TYPESAFE_API_KEY": KEY}
+    for (kind, flags), dry in itertools.product(GATE_MISFITS, ([], ["--dry-run"])):
+        c.cases += 1
+        case = f"gate-validation {kind} {flags + dry}"
+        run = drive(c.jev, ["classify", "--questions", c.questions_file(GATE_QUESTIONS[kind]), *flags, *dry, *typesafe],
+                    '{"id":1,"state":"x"}', env, respond=lambda i, r: b"{}")
+        if c.clean_exit("gate-clean-exit", case, run) and (
+                run.code != 1 or run.stdout or run.requests or run.key_reads or not run.stderr.startswith("jev: ")):
+            c.fail("gate-validation", case, f"exit {run.code} stderr {run.stderr!r} {len(run.requests)} requests "
+                                            f"{run.key_reads} key reads")
+    for kind, flags in GATE_FITS_OK:
+        c.cases += 1
+        case = f"gate-validation dry run {kind} {flags}"
+        run = drive(c.jev, ["classify", "--questions", c.questions_file(GATE_QUESTIONS[kind]), *flags, "--dry-run",
+                            *typesafe], '{"id":1,"state":"x"}', env, respond=lambda i, r: b"{}")
+        if c.clean_exit("gate-clean-exit", case, run) and (
+                run.code != 0 or run.requests or run.key_reads or not json.loads(run.stdout or "{}").get("dry_run")):
+            c.fail("gate-validation", case, f"exit {run.code} {len(run.requests)} requests {run.key_reads} key reads")
+    usage = [(flag, value) for flag in ("--fail-under", "--min-confidence") for value in GATE_BAD_VALUES]
+    usage += [("--abstain-band", value) for value in GATE_BAD_VALUES + GATE_BAD_BANDS]
+    for (flag, value), command in itertools.product(usage, ("classify", "batch")):
+        c.cases += 1
+        case = f"gate-usage {command} {flag} {value!r}"
+        run = drive(c.jev, [command, "--questions", c.questions_file(GATE_QUESTIONS["noul"]), f"{flag}={value}"],
+                    '{"id":1,"state":"x"}\n', env, respond=lambda i, r: b"{}")
+        if c.clean_exit("gate-clean-exit", case, run) and (run.code != 2 or run.stdout or run.requests):
+            c.fail("gate-usage", case, f"exit {run.code} stdout {run.stdout[:80]!r} {len(run.requests)} requests")
+
+
+def check_gate(c):
+    check_gate_exit(c)
+    check_gate_validation(c)
+
+
 # Broken variants of jev.py. Each must make the named property fail, or the check proves nothing.
 
 MUTANTS = [
@@ -1901,6 +2030,28 @@ MUTANTS = [
      [("respond(None, request, timeout, retries, stop, cache,", "respond(None, request, timeout, 0, stop, cache,")]),
     ("dry run prices only the first chunk", "chunk-dry-run",
      [("for start, end in spans]", "for start, end in spans[:1]]")]),
+    ("abstain band excludes its ends", "gate-exit",
+     [("gate.abstain_band[0] <= noul <= gate.abstain_band[1]:", "gate.abstain_band[0] < noul < gate.abstain_band[1]:")]),
+    ("fail-under decided before abstain", "gate-exit",
+     [("    if gate.abstain_band is not None and",
+       "    if gate.fail_under is not None and noul < gate.fail_under:\n        return GATE_FALSE\n"
+       "    if gate.abstain_band is not None and")]),
+    ("noul equal to --fail-under fails", "gate-exit",
+     [("    if gate.fail_under is not None and noul < gate.fail_under:",
+       "    if gate.fail_under is not None and noul <= gate.fail_under:")]),
+    ("min-confidence ignored", "gate-exit",
+     [("    if gate.min_confidence is not None and", "    if False and")]),
+    ("response withheld on a gate exit", "gate-exit",
+     [('    emit(result)\n    return gate_exit(gate, result["answers"]) if gate else 0',
+       '    code = gate_exit(gate, result["answers"]) if gate else 0\n    if code == 0:\n        emit(result)\n    return code')]),
+    ("--min-confidence fits noul questions", "gate-validation",
+     [('    "min_confidence": ("choice", "score"),', '    "min_confidence": ("choice", "score", "noul"),')]),
+    ("gate checked after credentials", "gate-validation",
+     [("    gate = build_gate(args, questions)\n", ""),
+      ("    cache = Cache(args.cache) if args.cache else None\n",
+       "    cache = Cache(args.cache) if args.cache else None\n    gate = build_gate(args, questions)\n")]),
+    ("band accepts LO above HI", "gate-usage",
+     [("    if low > high:", "    if False:")]),
     ("non-choice questions accepted for chunking", "chunk-guards",
      [('    if any(q["type"] != "choice" or', '    if False and any(q["type"] != "choice" or')]),
 ]
@@ -1962,6 +2113,19 @@ def check_flag_scope(c):
             if run.code != 2 or run.stdout or f"unrecognized arguments: {flag}" not in run.stderr \
                     or run.requests or run.key_reads or target.exists():
                 c.fail("flags-scoped", f"flags {name} {flag}", f"exit {run.code} stderr {run.stderr[-120:]!r}")
+    # Abbreviations are off: the shortest prefix that names one declared flag, and is not a flag itself, is unknown.
+    for name, flags in declared.items():
+        longs = [f for f in flags if f.startswith("--")]
+        for flag in sorted(longs):
+            prefix = next((flag[:n] for n in range(3, len(flag)) if flag[:n] not in flags
+                           and sum(f.startswith(flag[:n]) for f in longs) == 1), None)
+            if prefix is None:
+                continue
+            c.cases += 1
+            run = drive(c.jev, [name, *required[name], prefix, str(target)], "", {"TYPESAFE_API_KEY": KEY})
+            if run.code != 2 or run.stdout or f"unrecognized arguments: {prefix}" not in run.stderr \
+                    or run.requests or run.key_reads or target.exists():
+                c.fail("flags-scoped", f"abbreviation {name} {prefix}", f"exit {run.code} stderr {run.stderr[-120:]!r}")
 
 
 def run_all(jev, demo, depth, only=None):
@@ -1974,7 +2138,8 @@ def run_all(jev, demo, depth, only=None):
                          ("cache", lambda: check_cache(c, min(depth, 2))),
                          ("eval", lambda: check_eval(c)),
                          ("summarize", lambda: check_summarize(c, min(depth, 2))),
-                         ("chunk", lambda: check_chunk(c, depth))):
+                         ("chunk", lambda: check_chunk(c, depth)),
+                         ("gate", lambda: check_gate(c))):
             if only in (None, name):
                 fn()
         return c
@@ -1982,7 +2147,7 @@ def run_all(jev, demo, depth, only=None):
 
 SECTIONS = {"batch": "batch", "numbers": "numbers", "questions": "questions", "cache": "cache", "eval": "eval",
             "summarize": "summarize", "redact": "redaction", "demo": "redaction", "retry": "retry",
-            "chunk": "chunk"}
+            "chunk": "chunk", "gate": "gate"}
 
 
 # Properties checked outside the section their prefix names; a mutant must run where its property is checked.
@@ -2028,7 +2193,7 @@ def stale():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--depth", type=int, default=3, help="max batch length to enumerate (default 3)")
-    parser.add_argument("--only", choices=["batch", "schedules", "retry", "requests", "numbers", "questions", "redaction", "cache", "eval", "summarize", "chunk"])
+    parser.add_argument("--only", choices=["batch", "schedules", "retry", "requests", "numbers", "questions", "redaction", "cache", "eval", "summarize", "chunk", "gate"])
     parser.add_argument("--mutants", action="store_true", help="also prove each property fails on a broken jev.py")
     parser.add_argument("--stale", action="store_true", help="only report covered files whose content differs from SYNC_BLOBS")
     args = parser.parse_args()

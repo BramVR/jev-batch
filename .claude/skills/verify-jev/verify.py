@@ -55,6 +55,15 @@ RESULTS = "".join(line + "\n" for line in [
 STUB_RESPONSE = ('{"model":"stub-model","answers":{"topic":{"type":"choice","choice":"bug",'
                  '"confidence":0.30000000000000004,"probabilities":{"billing":0.1,"bug":0.30000000000000004,'
                  '"other":0.6}}},"usage":{"input_tokens":12,"output_tokens":3},"future_field":[1e-7,-0.0]}')
+def noul_reply(value):
+    return '{"model":"stub-model","answers":{"billing":{"type":"noul","noul":%s}},"usage":{"input_tokens":4}}' % value
+
+
+def printed(id_, reply):
+    """The stdout line classify prints for a stub reply: id first, then the parsed body re-serialized."""
+    return '{"id": ' + json.dumps(id_) + ", " + json.dumps(json.loads(reply))[1:] + "\n"
+
+
 DEMO_RESPONSE = '{"model":"stub-model","answers":{"failure_pattern":{"type":"choice","choice":"fine","probabilities":{"fine":1.0}}}}'
 # Synthetic look-alikes planted in a fake ~/.codex session; none may reach the stub unless --no-redact.
 DEMO_SECRETS = ["synthBearerTokenValue0123456789", "sk-synthetic0000aaaa1111bbbb2222", "synthPasswordValue42",
@@ -341,6 +350,24 @@ def journeys(stub_url, version):
                  ["classify", "--questions", "choice.json", "--retries", "1", *stub_args], '{"id":1,"state":"x"}',
                  stub=[ok("not json"), ok()], code=1, stderr="jev: System One returned invalid JSON",
                  stdout=lambda o: o == "", requests=lambda r: len(r) == 1),
+            Step("gate false: noul 0.2 under --fail-under 0.5 prints the full response, exits 10",
+                 ["classify", "--questions", "noul.json", "--fail-under", "0.5", *stub_args], '{"id":"g-1","state":"x"}',
+                 stub=[ok(noul_reply(0.2))], code=10, stdout=lambda o: o == printed("g-1", noul_reply(0.2)),
+                 requests=lambda r: len(r) == 1),
+            Step("abstain: noul 0.4 on the --abstain-band 0.4,0.6 edge exits 11, over --fail-under",
+                 ["classify", "--questions", "noul.json", "--abstain-band", "0.4,0.6", "--fail-under", "0.5", *stub_args],
+                 '{"id":"g-2","state":"x"}', stub=[ok(noul_reply(0.4))], code=11,
+                 stdout=lambda o: o == printed("g-2", noul_reply(0.4)), requests=lambda r: len(r) == 1),
+            Step("gate passes: noul 0.5 at --fail-under 0.5 exits 0",
+                 ["classify", "--questions", "noul.json", "--fail-under", "0.5", *stub_args], '{"id":"g-3","state":"x"}',
+                 stub=[ok(noul_reply(0.5))], stdout=lambda o: o == printed("g-3", noul_reply(0.5))),
+            Step("gate flag that does not fit the question fails before any request",
+                 ["classify", "--questions", "choice.json", "--fail-under", "0.5", *stub_args], '{"id":1,"state":"x"}',
+                 code=1, stderr="jev: --fail-under gates noul questions; 'topic' is choice",
+                 stdout=lambda o: o == "", requests=lambda r: not r),
+            Step("gate value outside [0, 1] is a usage error",
+                 ["classify", "--questions", "noul.json", "--fail-under", "1.5", *stub_args], '{"id":1,"state":"x"}',
+                 code=2, stderr="argument --fail-under: '1.5' is not a number in [0, 1]", requests=lambda r: not r),
         ],
         "batch": [
             Step("three lines in order, duplicate ids kept", ["batch", "--questions", "choice.json", *stub_args],

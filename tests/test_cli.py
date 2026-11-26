@@ -778,5 +778,158 @@ class CliTests(unittest.TestCase):
         self.assertEqual(install_python, "{}.{}".format(*lowest), "CI job install must run on the floor")
 
 
+    # Gate fixtures: one question of each gateable type, plus a mixed mapping that needs --question.
+    GATE_QUESTIONS = {
+        "noul": {"spam": {"type": "noul", "instructions": "Spam?"}},
+        "choice": QUESTIONS,
+        "score": {"level": {"type": "score", "criteria": ["low", "high"]}},
+        "mixed": {"spam": {"type": "noul", "instructions": "Spam?"}, **QUESTIONS},
+    }
+
+    def usage_error(self, argv):
+        """Exit code and stderr of a run argparse must reject before reading input or sending."""
+        with patch("sys.stdin", io.StringIO("")), patch("urllib.request.urlopen", side_effect=AssertionError), \
+             patch("jev.api_key", side_effect=AssertionError), contextlib.redirect_stderr(io.StringIO()) as err, \
+             self.assertRaises(SystemExit) as exit_:
+            jev.main(argv)
+        return exit_.exception.code, err.getvalue()
+
+    @staticmethod
+    def gate_response(name, **answer):
+        return {"model": "m", "answers": {name: answer}, "usage": {"input_tokens": 1}}
+
+    def test_gate_exit_codes(self):
+        noul = lambda value: ("noul", self.gate_response("spam", type="noul", noul=value))
+        choice = lambda winner, confidence: ("choice", self.gate_response(
+            "route", type="choice", choice=winner, confidence=confidence,
+            probabilities={"a": confidence, "b": 1 - confidence}))
+        score = lambda confidence: ("score", self.gate_response(
+            "level", type="score", score=1, legend="high", confidence=confidence))
+        band = ["--abstain-band", "0.4,0.6"]
+        table = [
+            (noul(0.5), ["--fail-under", "0.5"], 0),
+            (noul(0.4999), ["--fail-under", "0.5"], jev.GATE_FALSE),
+            (noul(0), ["--fail-under", "0"], 0),
+            (noul(1), ["--fail-under", "1"], 0),
+            (noul(0.9999), ["--fail-under", "1"], jev.GATE_FALSE),
+            (noul(0.4), band, jev.GATE_ABSTAIN),
+            (noul(0.6), band, jev.GATE_ABSTAIN),
+            (noul(0.3999), band, 0),
+            (noul(0.6001), band, 0),
+            (noul(0.5), ["--abstain-band", "0.5,0.5"], jev.GATE_ABSTAIN),
+            (noul(0.45), [*band, "--fail-under", "0.5"], jev.GATE_ABSTAIN),
+            (noul(0.3), [*band, "--fail-under", "0.5"], jev.GATE_FALSE),
+            (noul(0.7), [*band, "--fail-under", "0.5"], 0),
+            (noul(1), [], 0),
+            (choice("a", 0.75), ["--expect", "a"], 0),
+            (choice("a", 0.75), ["--expect", "b"], jev.GATE_FALSE),
+            (choice("a", 0.75), ["--min-confidence", "0.75"], 0),
+            (choice("a", 0.75), ["--min-confidence", "0.7501"], jev.GATE_FALSE),
+            (choice("a", 0.75), ["--expect", "a", "--min-confidence", "0.8"], jev.GATE_FALSE),
+            (choice("b", 0.9), ["--expect", "a", "--min-confidence", "0.8"], jev.GATE_FALSE),
+            (score(0.6), ["--min-confidence", "0.5"], 0),
+            (score(0.6), ["--min-confidence", "0.7"], jev.GATE_FALSE),
+            (("mixed", self.gate_response("spam", type="noul", noul=0.2)), ["--question", "spam", "--fail-under", "0.5"],
+             jev.GATE_FALSE),
+            (("mixed", self.gate_response("route", type="choice", choice="b", confidence=1)),
+             ["--question", "route", "--expect", "b"], 0),
+        ]
+        for (kind, response), flags, expected in table:
+            with self.subTest(answer=response["answers"], flags=flags):
+                code, out, err, sent = self.run_cli('{"id":"g","state":"x"}', "classify", response, flags,
+                                                    questions=self.GATE_QUESTIONS[kind])
+                self.assertEqual((code, err, len(sent)), (expected, "", 1))
+                # The full response is printed whatever the gate decides.
+                self.assertEqual(json.loads(out), {"id": "g", **response})
+
+    def test_gate_on_an_unreadable_answer_prints_the_response_and_exits_1(self):
+        for answer in ({"type": "noul"}, {"type": "noul", "noul": True}, {"type": "noul", "noul": "0.9"}, None):
+            response = {"model": "m", "answers": {} if answer is None else {"spam": answer}}
+            with self.subTest(answer=answer):
+                code, out, err, sent = self.run_cli('{"id":1,"state":"x"}', "classify", response,
+                                                    ["--fail-under", "0.5"], questions=self.GATE_QUESTIONS["noul"])
+                self.assertEqual((code, len(sent)), (1, 1))
+                self.assertEqual(json.loads(out), {"id": 1, **response})
+                self.assertEqual(err, "jev: cannot evaluate the gate; answer 'spam' has no numeric noul\n")
+
+    def test_gate_values_out_of_range_are_usage_errors(self):
+        for flags in (["--fail-under", "1.5"], ["--fail-under", "-0.1"], ["--fail-under", "nan"],
+                      ["--fail-under", "inf"], ["--fail-under", "x"], ["--min-confidence", "2"],
+                      ["--abstain-band", "0.6,0.4"], ["--abstain-band", "0.4"], ["--abstain-band", "0.1,0.2,0.3"],
+                      ["--abstain-band", "a,b"], ["--abstain-band", "0.4,1.1"], ["--abstain-band", "nan,0.5"]):
+            with self.subTest(flags=flags):
+                code, err = self.usage_error(["classify", "--questions", "q.json", *flags])
+                self.assertEqual(code, 2)
+                self.assertIn(f"argument {flags[0]}:", err)
+
+    def test_gate_that_cannot_fit_the_questions_fails_before_credentials_or_requests(self):
+        cases = [
+            ("noul", ["--expect", "a"], "--expect gates choice questions; 'spam' is noul"),
+            ("noul", ["--min-confidence", "0.5"], "--min-confidence gates choice or score questions; 'spam' is noul"),
+            ("choice", ["--fail-under", "0.5"], "--fail-under gates noul questions; 'route' is choice"),
+            ("choice", ["--abstain-band", "0.4,0.6"], "--abstain-band gates noul questions; 'route' is choice"),
+            ("score", ["--expect", "low"], "--expect gates choice questions; 'level' is score"),
+            ("choice", ["--expect", "c"], "--expect 'c' is not a criteria key of 'route'"),
+            ("mixed", ["--fail-under", "0.5"], "gate flags need --question when the questions file has several questions"),
+            ("mixed", ["--question", "nope", "--fail-under", "0.5"], "--question 'nope' is not in the questions file"),
+            ("mixed", ["--question", "route", "--fail-under", "0.5"], "--fail-under gates noul questions; 'route' is choice"),
+        ]
+        for kind, flags, message in cases:
+            for dry_run in ([], ["--dry-run"]):
+                with self.subTest(kind=kind, flags=flags, dry_run=dry_run), patch("jev.api_key") as key:
+                    code, out, err, sent = self.run_cli(
+                        '{"id":1,"state":"x"}', "classify", AssertionError,
+                        [*flags, *dry_run, "--base-url", "https://api.typesafe.ai/v1", "--model", "jev-1.14.0"],
+                        questions=self.GATE_QUESTIONS[kind])
+                    self.assertEqual((code, out, err, sent), (1, "", f"jev: {message}\n", []))
+                    key.assert_not_called()
+
+    def test_gate_dry_run_validates_and_exits_0_without_a_request(self):
+        code, out, err, sent = self.run_cli('{"id":1,"state":"x"}', "classify", AssertionError,
+                                            ["--dry-run", "--fail-under", "0.5", "--abstain-band", "0.4,0.6"],
+                                            questions=self.GATE_QUESTIONS["noul"])
+        self.assertEqual((code, err, sent), (0, "", []))
+        self.assertTrue(json.loads(out)["dry_run"])
+
+    def test_chunked_record_gates_on_the_aggregated_answer(self):
+        capacity = 4
+        budget = 512 + len(json.dumps(QUESTIONS, ensure_ascii=False).encode()) + capacity
+        replies = iter([{"answers": {"route": {"type": "choice", "choice": "a", "confidence": 0.9,
+                                               "probabilities": {"a": 0.9, "b": 0.1}}}},
+                        {"answers": {"route": {"type": "choice", "choice": "b", "confidence": 0.8,
+                                               "probabilities": {"a": 0.2, "b": 0.8}}}}])
+        # Mean probabilities are a 0.55, b 0.45: the winner is a at confidence 0.55. Each chunk alone passes 0.6.
+        code, out, err, sent = self.run_cli('{"id":1,"state":"abcdefgh"}', "classify", lambda r: next(replies),
+                                            ["--chunk-tokens", str(budget), "--min-confidence", "0.6"])
+        self.assertEqual((code, err, len(sent)), (jev.GATE_FALSE, "", 2))
+        self.assertEqual(json.loads(out)["answers"]["route"]["choice"], "a")
+
+    def test_only_classify_takes_gate_flags(self):
+        gates = (("--fail-under", "0.5"), ("--expect", "a"), ("--min-confidence", "0.5"), ("--abstain-band", "0.4,0.6"))
+        commands = {"batch": ["--questions", "q.json"], "eval": ["--questions", "q.json", "--labels", "l.jsonl"],
+                    "summarize": []}
+        for command, required in commands.items():
+            # eval and summarize declare their own --question; batch must not take it.
+            flags = gates + ((("--question", "spam"),) if command == "batch" else ())
+            for flag, value in flags:
+                with self.subTest(command=command, flag=flag):
+                    code, err = self.usage_error([command, *required, flag, value])
+                    self.assertEqual(code, 2)
+                    self.assertIn(f"unrecognized arguments: {flag}", err)
+
+    def test_readme_and_help_list_the_exit_codes_the_code_returns(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        section = re.search(r"^## Exit codes\n(.*?)(?=^## )", readme, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(section, "README.md needs an ## Exit codes section")
+        rows = re.findall(r"^\| `?(\d+)`? \| (.*?) \|$", section[1], re.MULTILINE)
+        self.assertEqual(rows, [(str(code), meaning) for code, meaning in jev.EXIT_CODES.items()],
+                         "README exit-code table must match jev.EXIT_CODES row by row")
+        for argv in (["--help"], ["classify", "--help"]):
+            result = subprocess.run([sys.executable, str(ROOT / "jev.py"), *argv], capture_output=True, encoding="utf-8")
+            self.assertEqual(result.returncode, 0)
+            for code, meaning in jev.EXIT_CODES.items():
+                self.assertIn(f"{code:<5}{meaning}", result.stdout, argv)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@
 - `classify-permanent-error` HTTP 401 and 422 make one request each and exit 1 with `not retryable`.
 - `classify-unavailable-phrase` an error body containing `Endpoint is unavailable` makes a 404 retryable (two requests, then the normal result). A 404 without it, and a 401 with it, make one request and exit 1 with `not retryable`.
 - `classify-bad-response` a 200 body that is not UTF-8 JSON with finite numbers exits 1 with `System One returned invalid JSON` after one request; it is never retried. A JSON body that is not an object with an `answers` object, or that carries its own `id`, also exits 1.
+- `classify-gate` with `--fail-under 0.5`, a stub noul of 0.2 exits 10 and 0.5 exits 0; noul 0.4 with `--abstain-band 0.4,0.6 --fail-under 0.5` exits 11. Each prints the full response first. A gate flag that does not fit the question exits 1 with no request, and a value outside [0, 1] exits 2.
 - `classify-timeout` a slow backend past `--timeout` with `--retries 0` makes one request and exits 1.
 
 ## How to get to it (user POV)
