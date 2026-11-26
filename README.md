@@ -44,6 +44,8 @@ printf '%s\n' '{"id":"ticket-1","state":"I was charged twice this month."}' |
 
 It prints one JSON line with the record `id` and the full System One response.
 
+To ask one question about plain text without writing any file, use [`ask`](#ask-one-question).
+
 ## What only jev-batch does
 
 Compared with [tumf/jev-cli](https://github.com/tumf/jev-cli), [shaharia-lab/jev-cli](https://github.com/shaharia-lab/jev-cli), and [nasrallah-al/jev-cli](https://github.com/nasrallah-al/jev-cli), checked on 2026-11-25:
@@ -138,7 +140,28 @@ printf '%s\n' '{"id":"ticket-1","state":"Charged twice"}' |
 - `--min-confidence C` gates a Choice or Score answer: `confidence < C` exits 10.
 - `--abstain-band LO,HI` gates a Noul answer: `LO <= noul <= HI` exits 11. Both ends are included, and abstain wins over every other gate flag.
 
-Flags combine; the gate passes, with exit 0, only when no flag fails. Values must be numbers in [0, 1], and the band needs `LO <= HI`. Anything else exits 2 as a usage error. A gate flag that does not fit the question type, an `--expect` key outside `criteria`, an unknown `--question`, or gate flags on a mapping of several questions without `--question` exit 1 before credentials are read or any request is sent, in a dry run too. The full response is always printed before the gate exit. An answer without the field a flag reads, such as a missing or boolean `noul`, is printed and then exits 1. A chunked record is gated on its aggregated answer. `--dry-run` validates the gate flags, evaluates no gate, and exits 0. `batch` takes no gate flags.
+Flags combine; the gate passes, with exit 0, only when no flag fails. Values must be numbers in [0, 1], and the band needs `LO <= HI`. Anything else exits 2 as a usage error. A gate flag that does not fit the question type, an `--expect` key outside `criteria`, an unknown `--question`, or gate flags on a mapping of several questions without `--question` exit 1 before credentials are read or any request is sent, in a dry run too. The full response is always printed before the gate exit. An answer without the field a flag reads, such as a missing or boolean `noul`, is printed and then exits 1. A chunked record is gated on its aggregated answer. `--dry-run` validates the gate flags, evaluates no gate, and exits 0. `batch` takes no gate flags. [`ask`](#ask-one-question) takes the gate flags that fit its question type.
+
+## Ask one question
+
+`ask` asks one question about plain text, with no question file and no JSON record. There is one sub-command per question type:
+
+```sh
+printf 'Charged twice' | python3 jev.py ask noul "Is this about billing?" --value
+python3 jev.py ask choice "Pick the topic." -o billing="Payments and charges." -o bug="Software defect." \
+  --state "I was charged twice this month."
+python3 jev.py ask score "How urgent is this?" -l "Can wait." -l "Today." -l "Right now." --state-file ticket.txt
+```
+
+- `ask noul QUESTION` sends `{"type": "noul", "instructions": QUESTION}`.
+- `ask choice QUESTION -o KEY=DESCRIPTION ...` adds `criteria` as an object, one entry per `-o` in the order given. `-o` is required and repeatable. It splits on the first `=`, so a description may contain `=`. An empty `KEY`, a value without `=`, or a repeated `KEY` exits 2.
+- `ask score QUESTION -l DESCRIPTION ...` adds `criteria` as a list, one level per `-l` in order, indexed from zero. `-l` is required and repeatable.
+
+The text comes from `--state TEXT`, `--state-file PATH` (UTF-8), or raw UTF-8 stdin. The two flags exclude each other, so passing both exits 2. The text is sent unchanged: no trimming, and CRLF line ends stay. Empty text exits 1 before credentials are read or any request is sent, in a dry run too.
+
+`ask` names the question `answer` and the record `{"id": null, "state": TEXT}`, then runs the same path as `classify`. The request body is byte for byte what `classify` sends for the question file `{"answer": {...}}` and that record, so backend selection, credentials, `--cache` entries, `--retries`, `--timeout`, and `--dry-run` behave the same. The output is the JSON line `classify` prints for that record. `--value` prints only `answers.answer.noul`, `.choice`, or `.score` instead: a choice key bare, a number as JSON. An answer without that field, or with the wrong type, prints nothing and exits 1. `--dry-run` prints its report whatever `--value` says. `ask` takes no `--questions`, `--chunk-tokens`, `--input`, or `--question`.
+
+Gate flags work as in [Gate on an answer](#gate-on-an-answer), and each type takes only those that fit it: `ask noul` takes `--fail-under` and `--abstain-band`, `ask choice` takes `--expect` and `--min-confidence`, and `ask score` takes `--min-confidence`. Any other gate flag exits 2. `--expect KEY` must be one of the `-o` keys, or `ask` exits 1 before any request. Exit codes 10 and 11 apply with or without `--value`, and the output prints first.
 
 ## Exit codes
 
@@ -324,7 +347,7 @@ python3 scripts/check_install.py
 
 Tests mock HTTP at the CLI boundary, checking request shape/auth, complete responses, failures, retries and backoff, the concurrency bound, partial batch output, and credential selection. Eval tests check the example fixture's exact metrics through a fresh process, edge cases, and that eval sends nothing and reads no credentials. No live API credential is required for tests. Summarize tests run the CLI on synthetic result files.
 
-Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI and the session demo against a loopback System One stub, with an opt-in `--live` journey of six synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, retry policy and backoff, batch order, window, and concurrency invariants, question-file versioning, response cache identity and resume, classify gate exit codes, and demo redaction over bounded inputs, and proves each check can fail on a broken `jev.py` or demo script:
+Two agent skills under `.claude/skills/` (mirrored in `.agents/skills/`) go further, both stdlib only. `verify-jev` drives a fresh copy of the CLI and the session demo against a loopback System One stub, with an opt-in `--live` journey of six synthetic OpenCode requests. `formal-verify-jev` exhaustively checks request shape, credential isolation, probability passthrough, retry policy and backoff, batch order, window, and concurrency invariants, question-file versioning, response cache identity and resume, classify gate exit codes, `ask` requests that equal `classify`'s, and demo redaction over bounded inputs, and proves each check can fail on a broken `jev.py` or demo script:
 
 ```sh
 python3 .claude/skills/verify-jev/verify.py run

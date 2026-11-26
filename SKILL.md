@@ -11,6 +11,8 @@ For classify-many work, script the loop. Extract records to JSONL `{id,state}`, 
 
 To branch a script on one answer, gate `classify` with `--fail-under`, `--expect`, `--min-confidence`, or `--abstain-band` (plus `--question NAME` for several questions): it still prints the full response, then exits 10 when the gate is false and 11 when Noul falls inside the abstain band; README lists every exit code.
 
+For one question about one piece of text, skip the files: `python3 jev.py ask noul|choice|score "QUESTION" [-o KEY=DESC ...|-l LEVEL ...] --state TEXT` (or `--state-file PATH`, or stdin) sends what `classify` would; `--value` prints only the answer field, and the gate flags that fit the type still set the exit code.
+
 Use Choice for categories, Score for ordered levels, and Noul for yes/no probabilities. Verify unfamiliar fields against the linked TypeSafe docs before writing questions. Free OpenCode Jev 1.13 supports text only. Box and assets require a supporting backend and model, such as TypeSafe Jev 1.14.
 
 Default to OpenCode `https://opencode.ai/zen/v1` and `jev-1.13-free`, without authentication. Override with `--base-url`/`JEV_BASE_URL` and `--model`/`JEV_MODEL`; flags win. To select TypeSafe, use `--base-url https://api.typesafe.ai/v1 --model jev-1.14.0` and `TYPESAFE_API_KEY` or macOS Keychain service `typesafe`. TypeSafe credentials are read only for its exact HTTPS origin. Never put secrets in records, question files, command arguments, or commits. Private source data needs authorization before API transmission. This skill grants none.
