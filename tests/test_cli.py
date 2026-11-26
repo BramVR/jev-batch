@@ -63,7 +63,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(req.get_method(), "POST")
             self.assertIsNone(req.get_header("Authorization"))
             self.assertEqual(req.get_header("Content-type"), "application/json")
-            self.assertEqual(req.get_header("User-agent"), "jev-batch/0.1")
+            self.assertEqual(req.get_header("User-agent"), "jev-batch/" + jev.__version__)
             self.assertEqual(json.loads(req.data), {"model": "jev-1.13-free", "state": record["state"], "questions": QUESTIONS})
             self.assertEqual(timeout, 60)
 
@@ -747,6 +747,16 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("sends nothing and reads no credentials", " ".join(result.stdout.split()))
 
+    def test_version_as_process(self):
+        result = subprocess.run([sys.executable, str(ROOT / "jev.py"), "--version"], capture_output=True, encoding="utf-8")
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, f"jev.py {jev.__version__}\n", ""))
+
+    def test_version_is_the_newest_changelog_release(self):
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        newest = re.search(r"^## (\d+\.\d+\.\d+)$", changelog, re.MULTILINE)
+        self.assertIsNotNone(newest, "CHANGELOG.md has no ## X.Y.Z heading")
+        self.assertEqual(jev.__version__, newest[1])
+
     def test_docs_state_the_retry_rule_the_code_runs(self):
         docs = {doc: " ".join((ROOT / doc).read_text(encoding="utf-8").split()) for doc in ("README.md", "SKILL.md")}
         for doc, text in docs.items():
@@ -754,7 +764,8 @@ class CliTests(unittest.TestCase):
         self.assertIn(f"(default {jev.DEFAULT_RETRIES}, max {jev.MAX_RETRIES}) after {jev.RETRY_RULE}", docs["README.md"])
 
     def test_documented_python_floor_is_the_lowest_ci_version(self):
-        matrix = re.search(r"python: \[(.*)\]", (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))[1]
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        matrix = re.search(r"python: \[(.*)\]", ci)[1]
         lowest = min(tuple(map(int, v.strip(' "').split("."))) for v in matrix.split(","))
         self.assertEqual(jev.MIN_PYTHON, lowest)
         floor = "Python {}.{}+".format(*lowest)
@@ -762,6 +773,9 @@ class CliTests(unittest.TestCase):
         self.assertIn(f"MIN_PYTHON = {lowest}", (verify / "verify.py").read_text(encoding="utf-8"))
         for doc in (ROOT / "README.md", verify / "SKILL.md"):
             self.assertIn(floor, doc.read_text(encoding="utf-8"), f"{doc.name} must state the CI floor")
+        self.assertIn('requires-python = ">={}.{}"'.format(*lowest), (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        install_python = re.search(r"^  install:\n.*?python-version: \"([0-9.]+)\"", ci, re.MULTILINE | re.DOTALL)[1]
+        self.assertEqual(install_python, "{}.{}".format(*lowest), "CI job install must run on the floor")
 
 
 if __name__ == "__main__":

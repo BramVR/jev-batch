@@ -12,6 +12,7 @@ python3 -m unittest discover -s tests -v
 python3 .claude/skills/verify-jev/verify.py run
 python3 .claude/skills/formal-verify-jev/check.py --mutants
 python3 .claude/skills/formal-verify-jev/check.py --stale
+python3 scripts/check_install.py  # needs network to fetch setuptools
 ```
 
 ## Rules
@@ -28,7 +29,7 @@ When a reviewer or the operator corrects a mistake, fix it and add or update a r
 | Question files load only through `load_questions()`. | Formal `questions-eval-same-loader` and the summarize loader mutant. |
 | After changing `jev.py` or `scripts/demo_sessions.py`, review `check.py` coverage, then update `SYNC_BLOBS`. | `check.py --stale` in CI. |
 | The retry rule has one source: `RETRY_RULE`, built from `NEVER_RETRIED` and `ENDPOINT_UNAVAILABLE`, which `send()` also uses. `--retries` help prints it; README and SKILL.md state it verbatim. | `tests/test_cli.py::test_docs_state_the_retry_rule_the_code_runs` (fails on the PR #15 README and on a code-only `NEVER_RETRIED` change); verify-jev `help states the full retry rule`. |
-| The lowest Python in the CI matrix is the floor: `MIN_PYTHON` in `jev.py` and `verify.py`, and the `Python X.Y+` line in README and verify-jev SKILL.md. Below it, both scripts exit 1 with a version message. | `tests/test_cli.py::test_documented_python_floor_is_the_lowest_ci_version`; CI job `below-floor` runs both on 3.8. |
+| The lowest Python in the CI matrix is the floor: `MIN_PYTHON` in `jev.py` and `verify.py`, `requires-python` in `pyproject.toml`, the CI `install` job, and the `Python X.Y+` line in README and verify-jev SKILL.md. Below it, both scripts exit 1 with a version message. | `tests/test_cli.py::test_documented_python_floor_is_the_lowest_ci_version`; CI job `below-floor` runs both on 3.8; CI job `install` checks the installed command on the floor. |
 
 ## Exceptions
 

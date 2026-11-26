@@ -33,7 +33,7 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "bcf75216da033f2c4911f60842761cbce29a31bf",
+    "jev.py": "984ffdebb0b64ba65d0451161c544eaaaa3c15d8",
     "scripts/demo_sessions.py": "85993fe7c2e4d7f521fd2e2e5f3d7382f5a1fb1b",
 }
 KEY = "sentinel-key-not-real"
@@ -528,7 +528,7 @@ def check_requests(c):
             "request-method": r.get_method() == "POST",
             "request-timeout": run.requests[0]["timeout"] == 7,
             "request-content-type": r.get_header("Content-type") == "application/json",
-            "request-user-agent": r.get_header("User-agent") == "jev-batch/0.1",
+            "request-user-agent": r.get_header("User-agent") == f"jev-batch/{c.jev.__version__}",
             "images-header-iff-images": (r.get_header("Typesafe-danger-zone-images") == "true") == images
             and r.get_header("Typesafe-danger-zone-images") in (None, "true"),
             "auth-sent-to-typesafe-when-keyed": (r.get_header("Authorization") == f"Bearer {KEY}") == (to_typesafe and with_key),
