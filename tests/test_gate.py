@@ -1,9 +1,11 @@
 import contextlib
 import io
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -38,11 +40,18 @@ class GateTests(unittest.TestCase):
         self.assertRegex(out, r"tree: HEAD [0-9a-f]{7,}, \d+ uncommitted paths")
 
     def test_a_tree_that_changes_during_the_run_fails(self):
-        stray = ROOT / "gate-stray.txt"
-        self.addCleanup(stray.unlink, missing_ok=True)
-        code, out = self.run_gate(f"steps:\n  - run: python3 -c \"open({str(stray)!r}, 'wb')\"\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", tmp], check=True)
+            (repo / "new.py").write_text("x = 1\n", encoding="utf-8")
+            subprocess.run(["git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                            "--allow-empty", "-m", "init"], check=True)
+            edit = f"python3 -c \"open({str(repo / 'new.py')!r}, 'a').write('y = 2')\""
+            with mock.patch.object(gate, "ROOT", repo):
+                code, out = self.run_gate(f"steps:\n  - run: {edit}\n")
         self.assertEqual(code, 1)
         self.assertIn("changed while the gate ran", out)
+        self.assertRegex(out.rstrip().split("\n")[-1], r"^tree: HEAD [0-9a-f]{7,}, 1 uncommitted paths$")
 
     def test_a_step_it_cannot_run_directly_fails_instead_of_being_skipped(self):
         for step in ("python3 -c 'pass' && false", "\"python3 -c 'pass'\"", "make check"):

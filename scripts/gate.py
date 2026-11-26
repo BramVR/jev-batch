@@ -42,7 +42,12 @@ def tree():
     head = subprocess.run([*git, "rev-parse", "--short", "HEAD"], capture_output=True, check=True).stdout.strip()
     status = subprocess.run([*git, "status", "--porcelain", "-z"], capture_output=True, check=True).stdout
     diff = subprocess.run([*git, "diff", "HEAD"], capture_output=True, check=True).stdout
-    return head.decode(), status.count(b"\0"), hashlib.sha256(head + status + diff).hexdigest()
+    digest = hashlib.sha256(head + status + diff)
+    untracked = subprocess.run([*git, "ls-files", "-z", "--others", "--exclude-standard"], capture_output=True,
+                               check=True).stdout
+    for path in filter(None, untracked.split(b"\0")):
+        digest.update((ROOT / path.decode()).read_bytes())
+    return head.decode(), status.count(b"\0"), digest.hexdigest()
 
 
 def main(ci=CI):
@@ -59,13 +64,13 @@ def main(ci=CI):
     print("== gate")
     for step, verdict, seconds in results:
         print(f"{verdict}  {step}  {seconds:.0f}s")
+    changed = tree() != before
+    if changed:
+        print("FAIL  HEAD or the working tree changed while the gate ran; rerun it on the final tree")
     head, dirty, _ = before
     print(f"tree: HEAD {head}, {dirty} uncommitted paths")
-    if tree() != before:
-        print("FAIL  HEAD or the working tree changed while the gate ran; rerun it on the final tree")
-        return 1
     ran = [verdict for _, verdict, _ in results if not verdict.startswith("SKIP")]
-    return 1 if not ran or any(verdict != "PASS" for verdict in ran) else 0
+    return 1 if changed or not ran or any(verdict != "PASS" for verdict in ran) else 0
 
 
 if __name__ == "__main__":
