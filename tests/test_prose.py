@@ -60,6 +60,8 @@ class ProseTests(unittest.TestCase):
         self.assertEqual(rules(None, GOOD.replace("## Verification", "## Scope")), [])
         self.assertEqual(rules(None, GOOD + "\n## Why\n\nAgain.\n"), ["heading"])
         self.assertEqual(rules(None, GOOD + "- line\n" * 30), ["length"])
+        self.assertEqual(rules(None, GOOD + "```md\n## Summary\n```\n"), [])
+        self.assertEqual(rules(None, "```md\n## Why\n```\n"), ["heading"])
 
     def test_pr_env_with_an_empty_body_fails(self):
         with mock.patch.dict("os.environ", {"PR_TITLE": "fix: x", "PR_BODY": ""}), \

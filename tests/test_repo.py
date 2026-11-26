@@ -6,8 +6,8 @@ import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-OLD_NAMES = re.compile(r"jev[-_](?:cli|classify)", re.I)
-COMPETITOR_LINK = re.compile(r"\b(?!BramVR/)[\w.-]+/jev-cli\b", re.I)
+OLD_NAMES = re.compile(r"\bjev[-_](?:cli|classify)\b", re.I)
+COMPETITOR_LINK = re.compile(r"\b(?:tumf|shaharia-lab|nasrallah-al)/jev-cli\b", re.I)
 HISTORY = {"CHANGELOG.md", "docs/demo.md", "tests/test_repo.py"}
 
 
@@ -50,6 +50,12 @@ class RepoTests(unittest.TestCase):
         files = [(p, (ROOT / p).read_bytes().decode("utf-8", "replace")) for p in repo_files("*")]
         self.assertEqual(stray_old_names(files), [], "the project is jev-batch; rename these, or link another "
                          "owner's repo as owner/name; CHANGELOG.md and docs/demo.md keep history")
+
+    def test_old_name_rule_matches_whole_names_and_only_competitor_owners(self):
+        lines = ["jev-client", "[tumf/jev-cli](https://github.com/tumf/jev-cli)", "docs/jev-cli", "BramVR/jev-cli",
+                 "jev_classify"]
+        self.assertEqual(stray_old_names([("README.md", "\n".join(lines))]),
+                         ["README.md:3: docs/jev-cli", "README.md:4: BramVR/jev-cli", "README.md:5: jev_classify"])
 
     def test_python_imports_only_the_standard_library(self):
         paths = repo_files("*.py")

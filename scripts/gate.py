@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 import hashlib
+import os
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / ".github" / "workflows" / "ci.yml"
-RUN = re.compile(r"^\s+(?:- )?run:\s*(.*)$", re.M)
-SHELL = {"&&", "||", "|", ";", "&", ">", ">>", "<"}
+RUN = re.compile(r"""^\s+(?:- )?["']?run["']?:\s*(.*)$""", re.M)
+TOKEN = re.compile(r"[\w./=:-]+")
 
 
 def plan(ci=CI):
@@ -19,11 +19,8 @@ def plan(ci=CI):
         if value[:1] in ("|", ">"):
             steps.append(("ci-only", value))
             continue
-        try:
-            argv = shlex.split(value, comments=True)
-        except ValueError:
-            argv = []
-        direct = argv[:1] == ["python3"] and not SHELL.intersection(argv) and not value.startswith(("'", '"'))
+        argv = re.sub(r"\s+#.*$", "", value).split()
+        direct = argv[:1] == ["python3"] and all(TOKEN.fullmatch(arg) for arg in argv)
         steps.append(("run" if direct else "unsupported", value))
     return steps
 
@@ -37,7 +34,9 @@ def tree():
     untracked = subprocess.run([*git, "ls-files", "-z", "--others", "--exclude-standard"], capture_output=True,
                                check=True).stdout
     for path in filter(None, untracked.split(b"\0")):
-        digest.update((ROOT / path.decode()).read_bytes())
+        entry = ROOT / path.decode()
+        content = os.readlink(entry).encode() if entry.is_symlink() else entry.read_bytes() if entry.is_file() else b""
+        digest.update(path + b"\0" + hashlib.sha256(content).digest())
     return head.decode(), status.count(b"\0"), digest.hexdigest()
 
 
@@ -50,7 +49,7 @@ def main(ci=CI):
             continue
         print(f"== {step}", flush=True)
         start = time.monotonic()
-        code = subprocess.run([sys.executable, *shlex.split(step, comments=True)[1:]], cwd=ROOT).returncode
+        code = subprocess.run([sys.executable, *re.sub(r"\s+#.*$", "", step).split()[1:]], cwd=ROOT).returncode
         results.append((step, "PASS" if code == 0 else f"FAIL ({code})", time.monotonic() - start))
     print("== gate")
     for step, verdict, seconds in results:

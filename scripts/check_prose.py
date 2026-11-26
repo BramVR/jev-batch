@@ -28,14 +28,18 @@ CODE = re.compile(r"`[^`\n]*`|https?://\S+|\]\([^)]*\)|<[^>\s]+>")
 MARKER = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+")
 
 
-def prose_problems(text, source):
-    found, fenced = [], False
+def unfenced(text):
+    fenced = False
     for number, line in enumerate(text.split("\n"), 1):
         if line.lstrip().startswith("```"):
             fenced = not fenced
-            continue
-        if fenced:
-            continue
+        elif not fenced:
+            yield number, line
+
+
+def prose_problems(text, source):
+    found = []
+    for number, line in unfenced(text):
         line = CODE.sub(" ", MARKER.sub("", line))
         for rule, pattern, fix in RULES:
             match = pattern.search(line)
@@ -47,7 +51,7 @@ def prose_problems(text, source):
 
 def shape_problems(body):
     found = []
-    headings = [(n, line[3:].strip()) for n, line in enumerate(body.split("\n"), 1) if line.startswith("## ")]
+    headings = [(n, line[3:].strip()) for n, line in unfenced(body) if line.startswith("## ")]
     for number, heading in headings:
         if heading not in HEADINGS:
             found.append(f"body:{number}: heading: '## {heading}' is not one of: {', '.join(HEADINGS)}")
