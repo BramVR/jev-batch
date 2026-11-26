@@ -33,7 +33,7 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "cfc4ec4e4a08ec0f9db76c4c682be94aad62e6fa",
+    "jev.py": "38f9211f770714fba0624f894cd1dbf4a4189c84",
     "scripts/demo_sessions.py": "85993fe7c2e4d7f521fd2e2e5f3d7382f5a1fb1b",
 }
 KEY = "sentinel-key-not-real"
@@ -2084,8 +2084,8 @@ MUTANTS = [
     ("dry run reads credentials", "dry-run-no-network-no-credentials",
      [("api_key() if backend.typesafe and not args.dry_run else None", "api_key() if backend.typesafe else None")]),
     ("dry run also sends", "dry-run-no-network-no-credentials",
-     [('            emit(dry_run_report([estimator(read_record())], backend))',
-       "            record = read_record()\n            classify(record, questions, key, backend, args.timeout)\n"
+     [('            emit(dry_run_report([estimator(record or read_record())], backend))',
+       "            record = record or read_record()\n            classify(record, questions, key, backend, args.timeout)\n"
        "            emit(dry_run_report([estimator(record)], backend))")]),
     ("dry run skips record validation", "dry-run-validates-like-send",
      [("    payload = request_payload(record, questions, backend)\n    text = ",
@@ -2101,8 +2101,8 @@ MUTANTS = [
      [('"question_tokens_estimate": estimate_tokens(questions)',
        '"question_tokens_estimate": estimate_tokens({"schema_version": 1, "questions": questions})')]),
     ("dry run writes the cache", "dry-run-ignores-cache",
-     [('            emit(dry_run_report([estimator(read_record())], backend))',
-       "            record = read_record()\n"
+     [('            emit(dry_run_report([estimator(record or read_record())], backend))',
+       "            record = record or read_record()\n"
        "            cache and cache.store(cache.path(backend.endpoint, request_body(request_payload(record, questions, backend))), {\"answers\": {}})\n"
        "            emit(dry_run_report([estimator(record)], backend))")]),
     ("dry run total drops a batch row", "dry-run-total-is-sum",
@@ -2195,6 +2195,8 @@ MUTANTS = [
      [("    return state\n", "    return state.strip()\n")]),
     ("ask sends empty state", "ask-empty-state",
      [("    if not state:\n", "    if False:\n")]),
+    ("ask reads its state after credentials", "ask-empty-state",
+     [('    record = read_record() if args.command == "ask" else None\n', "    record = None\n")]),
     ("--value prints a choice as a JSON string", "ask-value",
      [("print(value if isinstance(value, str) else json.dumps(value), flush=True)", "print(json.dumps(value), flush=True)")]),
     ("every gate flag on every ask type", "ask-gate-flags-fit",

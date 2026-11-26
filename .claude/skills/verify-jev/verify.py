@@ -911,7 +911,9 @@ def write_fixtures(work):
                         "ask-noul.json": {"answer": {"type": "noul", "instructions": ASK_QUESTION}},
                         "state.txt": "Server down\r\nsince 9am\r\n",
                         "record.json": {"id": {"ticket": 7}, "state": {"subject": "App crashes on save"}}}.items():
-        (work / name).write_text(value if isinstance(value, str) else json.dumps(value), encoding="utf-8")
+        # Bytes, so state.txt keeps exactly its CRLF line ends on every platform.
+        text = value if isinstance(value, str) else json.dumps(value)
+        (work / name).write_bytes(text.encode("utf-8"))
     # Fake HOME session read by scripts/demo_sessions.py; synthetic text only, never a real session.
     sessions = work / ".codex/sessions"
     sessions.mkdir(parents=True, exist_ok=True)

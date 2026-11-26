@@ -906,7 +906,6 @@ def run_files(args):
 
 def run_ask(args):
     """ask: one question and an {"id": null, "state": TEXT} record, both built in memory."""
-    record = {"id": None, "state": ask_state(args)}
     kinds = ASK_TYPES[args.ask].value
 
     def show(result):
@@ -915,7 +914,7 @@ def run_ask(args):
             return
         value = answer_field(result["answers"], "answer", args.ask, kinds, "print --value")
         print(value if isinstance(value, str) else json.dumps(value), flush=True)
-    return run_send(args, lambda: {"answer": ask_question(args)}, lambda: record, show)
+    return run_send(args, lambda: {"answer": ask_question(args)}, lambda: {"id": None, "state": ask_state(args)}, show)
 
 
 def run_send(args, read_questions, read_record, show=emit):
@@ -934,6 +933,8 @@ def run_send(args, read_questions, read_record, show=emit):
     backend = Backend(args.base_url, args.model)
     if any(q["type"] == "box" for q in questions.values()) and not backend.supports_box:
         raise JevError("Box and assets require a backend and model with image support; free Jev 1.13 is unsupported")
+    # ask reads its text here: bad flags fail without waiting on stdin, and empty text fails before credentials.
+    record = read_record() if args.command == "ask" else None
     key = api_key() if backend.typesafe and not args.dry_run else None
     cache = Cache(args.cache) if args.cache else None
 
@@ -943,7 +944,7 @@ def run_send(args, read_questions, read_record, show=emit):
                 return estimate(record, questions, backend)
             return estimate_chunked(record, questions, backend, chunk_tokens)
         if args.command != "batch":
-            emit(dry_run_report([estimator(read_record())], backend))
+            emit(dry_run_report([estimator(record or read_record())], backend))
             return 0
         rows = []
         for number, line in enumerate(sys.stdin, 1):
@@ -957,7 +958,7 @@ def run_send(args, read_questions, read_record, show=emit):
         return 0
     if args.command == "batch":
         return batch(questions, key, backend, args.timeout, args.retries, args.concurrency, cache, chunk_tokens)
-    record = read_record()
+    record = record or read_record()
     if chunk_tokens is None:
         result = classify(record, questions, key, backend, args.timeout, args.retries, cache=cache)
     else:

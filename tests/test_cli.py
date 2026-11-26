@@ -1035,6 +1035,21 @@ class CliTests(unittest.TestCase):
                         self.assertEqual(err, "jev: state is empty; pass --state TEXT, --state-file PATH, or text on stdin\n")
                         key.assert_not_called()
 
+    def test_ask_rejects_bad_settings_without_reading_stdin(self):
+        cases = [("choice", ["--expect", "c"], "--expect 'c' is not a criteria key"),
+                 ("noul", ["--timeout", "0"], "timeout must be positive"),
+                 ("noul", ["--base-url", "ftp://x"], "base URL must be an HTTP(S) URL")]
+        for kind, extra, message in cases:
+            with self.subTest(extra=extra), patch("sys.stdin") as stdin, patch("jev.api_key") as key, \
+                 patch("urllib.request.urlopen", side_effect=AssertionError), \
+                 contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+                stdin.read.side_effect = AssertionError("stdin read")
+                code = jev.main(["ask", kind, "Q?", *self.ASK[kind][0], *extra])
+            self.assertEqual((code, out.getvalue()), (1, ""), extra)
+            self.assertIn(message, err.getvalue())
+            stdin.read.assert_not_called()
+            key.assert_not_called()
+
     def test_ask_usage_errors(self):
         cases = [
             (["ask", "choice", "Q?"], "the following arguments are required: -o"),
