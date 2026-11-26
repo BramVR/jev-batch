@@ -33,7 +33,7 @@ DEMO = ROOT / "scripts" / "demo_sessions.py"
 COVERED = ["jev.py", "scripts/demo_sessions.py"]
 # Git blob ids of each covered file as last checked. Content, not a commit, so rebases and squash merges keep it valid.
 SYNC_BLOBS = {
-    "jev.py": "0a5c0beeec287e51d0feca60e6470e82b75ac1bc",
+    "jev.py": "cfc4ec4e4a08ec0f9db76c4c682be94aad62e6fa",
     "scripts/demo_sessions.py": "85993fe7c2e4d7f521fd2e2e5f3d7382f5a1fb1b",
 }
 KEY = "sentinel-key-not-real"
@@ -1829,6 +1829,142 @@ def check_gate(c):
     check_gate_validation(c)
 
 
+# ask: the question README says each type builds and an {"id": null, "state": TEXT} record go down classify's path.
+# For every type, question text, state, state source, and backend in scope, ask's request, output, dry-run report,
+# and gate exit equal classify's for that question file and record. --value prints only the answer field. Empty
+# state exits 1 before credentials or any request.
+
+ASK_TEXTS = ["Is this about billing?", "\u00fcn\u00ef \u2713 \"quoted\" = 1"]
+ASK_STATES = ["Charged twice", " padded\r\n", "\u2028\u00fcn\u00ef \u2713\U0001F642", "\n", "{\"id\": 1}"]
+ASK_BASES = [("http://127.0.0.1:8080/x/", {}), ("https://api.typesafe.ai/v1", {"TYPESAFE_API_KEY": KEY})]
+# (flags, question builder from the text). Repeated -l levels stay in order, indexed from 0.
+ASK_KINDS = {
+    "noul": ([], lambda text: {"type": "noul", "instructions": text}),
+    "choice": (["-o", "a=A", "-o", "b=B = c", "-o", "e="],
+               lambda text: {"type": "choice", "instructions": text, "criteria": {"a": "A", "b": "B = c", "e": ""}}),
+    "score": (["-l", "lo", "-l", "hi", "-l", "lo"],
+              lambda text: {"type": "score", "instructions": text, "criteria": ["lo", "hi", "lo"]}),
+}
+ASK_ANSWERS = {"noul": ({"type": "noul", "noul": 0.30000000000000004}, "0.30000000000000004\n"),
+               "choice": ({"type": "choice", "choice": "b", "confidence": 1e-07}, "b\n"),
+               "score": ({"type": "score", "score": 2, "confidence": 0.5}, "2\n")}
+# README restated: which gate flags each ask type takes.
+ASK_GATE_FLAGS = {"noul": {"--fail-under", "--abstain-band"}, "choice": {"--expect", "--min-confidence"},
+                  "score": {"--min-confidence"}}
+ALL_GATE_FLAGS = set().union(*ASK_GATE_FLAGS.values())
+# Gate grid questions as ask flags: the same criteria as GATE_QUESTIONS, under the name "answer".
+ASK_GATE_KINDS = {"noul": [], "choice": ["-o", "a=A", "-o", "b=B"], "score": ["-l", "lo", "-l", "hi"]}
+
+
+def ask_sources(c, state):
+    path = c.tmp / f"state{len(list(c.tmp.glob('state*')))}.txt"
+    path.write_bytes(state.encode("utf-8"))
+    return {"--state": (["--state", state], ""), "--state-file": (["--state-file", str(path)], ""), "stdin": ([], state)}
+
+
+def request_view(run):
+    return [(r["request"].full_url, r["request"].data, r["request"].header_items(), r["timeout"]) for r in run.requests]
+
+
+def check_ask_like_classify(c):
+    for (kind, (flags, build)), text, state, (base, env) in itertools.product(ASK_KINDS.items(), ASK_TEXTS, ASK_STATES,
+                                                                              ASK_BASES):
+        question = build(text)
+        answer, value = ASK_ANSWERS[kind]
+        response = json.dumps({"model": "m", "answers": {"answer": answer}, "usage": {"input_tokens": 1}}).encode()
+        common = ["--base-url", base, "--model", "jev-1.14.0", "--timeout", "7"]
+        classify = ["classify", "--questions", c.questions_file({"answer": question}), *common]
+        record = json.dumps({"id": None, "state": state})
+        sent = drive(c.jev, classify, record, env, lambda i, r: response)
+        dry = drive(c.jev, [*classify, "--dry-run"], record, env, lambda i, r: response)
+        for source, (state_flags, stdin) in ask_sources(c, state).items():
+            ask = ["ask", kind, text, *flags, *state_flags, *common]
+            case = f"ask {kind} text={text!r} state={state!r} via {source} base={base}"
+            c.cases += 1
+            run = drive(c.jev, ask, stdin, env, lambda i, r: response)
+            if not c.clean_exit("ask-clean-exit", case, run):
+                continue
+            body = {"model": "jev-1.14.0", "state": state, "questions": {"answer": question}}
+            if len(run.requests) != 1 or request_view(run) != request_view(sent) \
+                    or not same(json.loads(run.requests[0]["request"].data), body):
+                c.fail("ask-request-like-classify", case, f"{len(run.requests)} requests; ask sent "
+                       f"{[v[1][:120] for v in request_view(run)]}, classify sent {[v[1][:120] for v in request_view(sent)]}")
+            if (run.code, run.stdout, run.stderr, run.key_reads) != (sent.code, sent.stdout, sent.stderr, sent.key_reads):
+                c.fail("ask-output-like-classify", case, f"ask exit {run.code} {run.stdout[:80]!r}, "
+                                                         f"classify exit {sent.code} {sent.stdout[:80]!r}")
+            c.cases += 1
+            shown = drive(c.jev, [*ask, "--value"], stdin, env, lambda i, r: response)
+            if c.clean_exit("ask-clean-exit", case, shown) and (shown.code, shown.stdout, shown.stderr) != (0, value, ""):
+                c.fail("ask-value", case + " --value", f"exit {shown.code} stdout {shown.stdout!r}, expected {value!r}")
+            c.cases += 1
+            ask_dry = drive(c.jev, [*ask, "--dry-run", "--value"], stdin, env, lambda i, r: response)
+            if c.clean_exit("ask-clean-exit", case, ask_dry) and (
+                    (ask_dry.code, ask_dry.stdout, ask_dry.stderr) != (dry.code, dry.stdout, dry.stderr)
+                    or ask_dry.requests or ask_dry.key_reads or not dry.stdout):
+                c.fail("ask-dry-run-like-classify", case + " --dry-run --value",
+                       f"ask exit {ask_dry.code} {ask_dry.stdout[:80]!r}, {len(ask_dry.requests)} requests, "
+                       f"{ask_dry.key_reads} key reads; classify exit {dry.code} {dry.stdout[:80]!r}")
+
+
+def check_ask_empty_state(c):
+    for kind, dry, (base, env) in itertools.product(ASK_KINDS, ([], ["--dry-run"]), ASK_BASES):
+        for source, (state_flags, stdin) in ask_sources(c, "").items():
+            c.cases += 1
+            case = f"ask-empty-state {kind} via {source} {dry} base={base}"
+            run = drive(c.jev, ["ask", kind, "Q?", *ASK_KINDS[kind][0], *state_flags, *dry, "--base-url", base],
+                        stdin, env, lambda i, r: b'{"answers":{}}')
+            if c.clean_exit("ask-clean-exit", case, run) and (
+                    run.code != 1 or run.stdout or run.requests or run.key_reads or not run.stderr.startswith("jev: ")):
+                c.fail("ask-empty-state", case, f"exit {run.code} stderr {run.stderr!r} {len(run.requests)} requests "
+                                                f"{run.key_reads} key reads")
+
+
+def check_ask_gate(c):
+    for kind, _, answer, flags in gate_cases():
+        if kind == "mixed":
+            continue
+        answer = {k: v for k, v in answer.items() if v is not ABSENT}
+        response = {"model": "m", "answers": {"answer": answer}, "usage": {"input_tokens": 1}}
+        argv = ["ask", kind, "Q?", *ASK_GATE_KINDS[kind], "--state", "x", "--retries", "0"]
+        for flag, value in flags.items():
+            argv += [GATE_FLAGS[flag], value] if value is not None else []
+        expected = gate_oracle(answer, **flags)
+        for shown in ([], ["--value"]):
+            c.cases += 1
+            case = f"ask-gate {kind} answer={answer} {argv[3:] + shown}"
+            run = drive(c.jev, argv + shown, "", respond=lambda i, r: json.dumps(response).encode())
+            if not c.clean_exit("ask-clean-exit", case, run):
+                continue
+            if shown:
+                # --value exits 1 on its own when the field it prints is unreadable.
+                field = answer.get(kind)
+                readable = isinstance(field, str) if kind == "choice" else is_number(field)
+                printed = run.stdout == (field if isinstance(field, str) else json.dumps(field)) + "\n" if readable else not run.stdout
+                code = expected if readable else 1
+            else:
+                printed = run.stdout.endswith("\n") and same(json.loads(run.stdout), {"id": None, **response})
+                code = expected
+            if run.code != code or not printed or len(run.requests) != 1:
+                c.fail("ask-gate-exit", case, f"exit {run.code}, expected {code}; stdout {run.stdout[:80]!r}")
+    # Each ask type declares exactly the gate flags that fit it, so any other is a usage error before any request.
+    for kind, fits in ASK_GATE_FLAGS.items():
+        for flag in sorted(ALL_GATE_FLAGS):
+            c.cases += 1
+            value = "0.4,0.6" if flag == "--abstain-band" else "a" if flag == "--expect" else "0.5"
+            case = f"ask-gate-flags {kind} {flag}"
+            run = drive(c.jev, ["ask", kind, "Q?", *ASK_GATE_KINDS[kind], "--state", "x", flag, value, "--dry-run"], "",
+                        respond=lambda i, r: b"{}")
+            usage = run.code == 2 and f"unrecognized arguments: {flag}" in run.stderr
+            if not c.clean_exit("ask-clean-exit", case, run) or usage == (flag in fits) or run.requests:
+                c.fail("ask-gate-flags-fit", case, f"exit {run.code} stderr {run.stderr[-120:]!r}")
+
+
+def check_ask(c):
+    check_ask_like_classify(c)
+    check_ask_empty_state(c)
+    check_ask_gate(c)
+
+
 # Broken variants of jev.py. Each must make the named property fail, or the check proves nothing.
 
 MUTANTS = [
@@ -1948,9 +2084,9 @@ MUTANTS = [
     ("dry run reads credentials", "dry-run-no-network-no-credentials",
      [("api_key() if backend.typesafe and not args.dry_run else None", "api_key() if backend.typesafe else None")]),
     ("dry run also sends", "dry-run-no-network-no-credentials",
-     [('            emit(dry_run_report([estimator(read_json(raw))], backend))',
-       "            emit(dry_run_report([[classify(read_json(raw), questions, key, backend, args.timeout), "
-       "estimator(read_json(raw))][1]], backend))")]),
+     [('            emit(dry_run_report([estimator(read_record())], backend))',
+       "            record = read_record()\n            classify(record, questions, key, backend, args.timeout)\n"
+       "            emit(dry_run_report([estimator(record)], backend))")]),
     ("dry run skips record validation", "dry-run-validates-like-send",
      [("    payload = request_payload(record, questions, backend)\n    text = ",
        "    payload = dict(record, questions=questions)\n    text = ")]),
@@ -1965,9 +2101,10 @@ MUTANTS = [
      [('"question_tokens_estimate": estimate_tokens(questions)',
        '"question_tokens_estimate": estimate_tokens({"schema_version": 1, "questions": questions})')]),
     ("dry run writes the cache", "dry-run-ignores-cache",
-     [('            emit(dry_run_report([estimator(read_json(raw))], backend))',
-       "            cache and cache.store(cache.path(backend.endpoint, request_body(request_payload(read_json(raw), questions, backend))), {\"answers\": {}})\n"
-       + '            emit(dry_run_report([estimator(read_json(raw))], backend))')]),
+     [('            emit(dry_run_report([estimator(read_record())], backend))',
+       "            record = read_record()\n"
+       "            cache and cache.store(cache.path(backend.endpoint, request_body(request_payload(record, questions, backend))), {\"answers\": {}})\n"
+       "            emit(dry_run_report([estimator(record)], backend))")]),
     ("dry run total drops a batch row", "dry-run-total-is-sum",
      [('total = sum(row["input_tokens_estimate"] for row in rows)',
        'total = sum(row["input_tokens_estimate"] for row in rows[1:]) or rows[0]["input_tokens_estimate"]')]),
@@ -2042,8 +2179,8 @@ MUTANTS = [
     ("min-confidence ignored", "gate-exit",
      [("    if gate.min_confidence is not None and", "    if False and")]),
     ("response withheld on a gate exit", "gate-exit",
-     [('    emit(result)\n    return gate_exit(gate, result["answers"]) if gate else 0',
-       '    code = gate_exit(gate, result["answers"]) if gate else 0\n    if code == 0:\n        emit(result)\n    return code')]),
+     [('    show(result)\n    return gate_exit(gate, result["answers"]) if gate else 0',
+       '    code = gate_exit(gate, result["answers"]) if gate else 0\n    if code == 0:\n        show(result)\n    return code')]),
     ("--min-confidence fits noul questions", "gate-validation",
      [('    "min_confidence": ("choice", "score"),', '    "min_confidence": ("choice", "score", "noul"),')]),
     ("gate checked after credentials", "gate-validation",
@@ -2054,6 +2191,17 @@ MUTANTS = [
      [("    if low > high:", "    if False:")]),
     ("non-choice questions accepted for chunking", "chunk-guards",
      [('    if any(q["type"] != "choice" or', '    if False and any(q["type"] != "choice" or')]),
+    ("ask strips its state", "ask-request-like-classify",
+     [("    return state\n", "    return state.strip()\n")]),
+    ("ask sends empty state", "ask-empty-state",
+     [("    if not state:\n", "    if False:\n")]),
+    ("--value prints a choice as a JSON string", "ask-value",
+     [("print(value if isinstance(value, str) else json.dumps(value), flush=True)", "print(json.dumps(value), flush=True)")]),
+    ("every gate flag on every ask type", "ask-gate-flags-fit",
+     [("        if set(GATE_FITS[name]) & set(types):", "        if True:")]),
+    ("--value prints the gated answer only when the gate passes", "ask-gate-exit",
+     [("    show(result)\n    return gate_exit(", "    code = gate_exit(gate, result[\"answers\"]) if gate else 0\n"
+       "    if code == 0:\n        show(result)\n    return code or gate_exit(")]),
 ]
 
 # Broken variants of scripts/demo_sessions.py, checked the same way.
@@ -2092,15 +2240,30 @@ DEMO_MUTANTS = [
 KNOWN_FINDINGS = {}
 
 
+def leaf_commands(parser, path=()):
+    """Every runnable command path, nested ones included, such as ("ask", "choice"), mapped to its parser."""
+    subs = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
+    if not subs:
+        return {path: parser}
+    return {leaf: sub for name, child in subs[0].choices.items()
+            for leaf, sub in leaf_commands(child, (*path, name)).items()}
+
+
 def check_flag_scope(c):
     """Derived from jev's own parser: a flag some command declares is a usage error on every command that lacks it,
-    and the offline commands declare none of the flags shared by classify and batch except --questions."""
-    commands = next(a for a in c.jev.build_parser()._actions if isinstance(a, argparse._SubParsersAction)).choices
+    nested ask commands included, and the offline commands declare none of the flags shared by classify and batch
+    except --questions."""
+    commands = leaf_commands(c.jev.build_parser())
     declared = {name: {flag for action in sub._actions for flag in action.option_strings} for name, sub in commands.items()}
-    required = {name: [arg for action in sub._actions if action.required for arg in (action.option_strings[0], "x")]
+    # Each required positional gets "x", each required flag "k=x", which also parses as -o KEY=DESCRIPTION.
+    required = {name: [arg for action in sub._actions if action.required
+                       for arg in ((action.option_strings[0], "k=x") if action.option_strings else ("x",))]
                 for name, sub in commands.items()}
-    sending = (declared["classify"] & declared["batch"]) - {"-h", "--help", "--questions"}
-    for name in ("eval", "summarize"):
+    c.cases += 1
+    if not {("ask", "noul"), ("ask", "choice"), ("ask", "score")} <= set(commands):
+        c.fail("flags-scoped", "ask commands", f"leaf commands {sorted(commands)}")
+    sending = (declared[("classify",)] & declared[("batch",)]) - {"-h", "--help", "--questions"}
+    for name in (("eval",), ("summarize",)):
         c.cases += 1
         if declared[name] & sending:
             c.fail("flags-scoped", f"flags {name} declares", f"sending-only flags {sorted(declared[name] & sending)}")
@@ -2109,7 +2272,7 @@ def check_flag_scope(c):
     for name, flags in declared.items():
         for flag in sorted(every - flags):
             c.cases += 1
-            run = drive(c.jev, [name, *required[name], flag, str(target)], "", {"TYPESAFE_API_KEY": KEY})
+            run = drive(c.jev, [*name, *required[name], flag, str(target)], "", {"TYPESAFE_API_KEY": KEY})
             if run.code != 2 or run.stdout or f"unrecognized arguments: {flag}" not in run.stderr \
                     or run.requests or run.key_reads or target.exists():
                 c.fail("flags-scoped", f"flags {name} {flag}", f"exit {run.code} stderr {run.stderr[-120:]!r}")
@@ -2122,7 +2285,7 @@ def check_flag_scope(c):
             if prefix is None:
                 continue
             c.cases += 1
-            run = drive(c.jev, [name, *required[name], prefix, str(target)], "", {"TYPESAFE_API_KEY": KEY})
+            run = drive(c.jev, [*name, *required[name], prefix, str(target)], "", {"TYPESAFE_API_KEY": KEY})
             if run.code != 2 or run.stdout or f"unrecognized arguments: {prefix}" not in run.stderr \
                     or run.requests or run.key_reads or target.exists():
                 c.fail("flags-scoped", f"abbreviation {name} {prefix}", f"exit {run.code} stderr {run.stderr[-120:]!r}")
@@ -2139,7 +2302,8 @@ def run_all(jev, demo, depth, only=None):
                          ("eval", lambda: check_eval(c)),
                          ("summarize", lambda: check_summarize(c, min(depth, 2))),
                          ("chunk", lambda: check_chunk(c, depth)),
-                         ("gate", lambda: check_gate(c))):
+                         ("gate", lambda: check_gate(c)),
+                         ("ask", lambda: check_ask(c))):
             if only in (None, name):
                 fn()
         return c
@@ -2147,7 +2311,7 @@ def run_all(jev, demo, depth, only=None):
 
 SECTIONS = {"batch": "batch", "numbers": "numbers", "questions": "questions", "cache": "cache", "eval": "eval",
             "summarize": "summarize", "redact": "redaction", "demo": "redaction", "retry": "retry",
-            "chunk": "chunk", "gate": "gate"}
+            "chunk": "chunk", "gate": "gate", "ask": "ask"}
 
 
 # Properties checked outside the section their prefix names; a mutant must run where its property is checked.
@@ -2193,7 +2357,7 @@ def stale():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--depth", type=int, default=3, help="max batch length to enumerate (default 3)")
-    parser.add_argument("--only", choices=["batch", "schedules", "retry", "requests", "numbers", "questions", "redaction", "cache", "eval", "summarize", "chunk", "gate"])
+    parser.add_argument("--only", choices=["batch", "schedules", "retry", "requests", "numbers", "questions", "redaction", "cache", "eval", "summarize", "chunk", "gate", "ask"])
     parser.add_argument("--mutants", action="store_true", help="also prove each property fails on a broken jev.py")
     parser.add_argument("--stale", action="store_true", help="only report covered files whose content differs from SYNC_BLOBS")
     args = parser.parse_args()
