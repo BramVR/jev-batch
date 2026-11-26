@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""Run the CI gate locally: every `run:` step in ci.yml, in order, under this interpreter.
-
-`uv run --python 3.9 scripts/gate.py` gates the floor. Multi-line `run: |` steps, such as the
-Python 3.8 `below-floor` job, stay CI-only. A one-line step that is not a plain `python3 ...` call
-fails instead of being skipped. Every step runs even after a failure; exit 1 if any failed, or if
-HEAD or the working tree changed while the gate ran.
-"""
 import hashlib
 from pathlib import Path
 import re
@@ -21,7 +14,6 @@ SHELL = {"&&", "||", "|", ";", "&", ">", ">>", "<"}
 
 
 def plan(ci=CI):
-    """Return (kind, command) per `run:` step: kind is "run", "ci-only", or "unsupported"."""
     steps = []
     for value in RUN.findall(ci.read_text(encoding="utf-8")):
         if value[:1] in ("|", ">"):
@@ -37,7 +29,6 @@ def plan(ci=CI):
 
 
 def tree():
-    """Return (short HEAD, uncommitted path count, digest of HEAD plus every uncommitted change)."""
     git = ["git", "-C", str(ROOT)]
     head = subprocess.run([*git, "rev-parse", "--short", "HEAD"], capture_output=True, check=True).stdout.strip()
     status = subprocess.run([*git, "status", "--porcelain", "-z"], capture_output=True, check=True).stdout

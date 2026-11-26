@@ -7,7 +7,6 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 OLD_NAMES = re.compile(r"jev[-_](?:cli|classify)", re.I)
-# Other owners' projects keep the old name; history files record what was true then.
 COMPETITOR_LINK = re.compile(r"\b(?!BramVR/)[\w.-]+/jev-cli\b", re.I)
 HISTORY = {"CHANGELOG.md", "docs/demo.md", "tests/test_repo.py"}
 
@@ -19,7 +18,6 @@ def repo_files(pattern):
 
 
 def stray_old_names(files):
-    """Return "path:line: text" for each old project name outside history files and competitor links."""
     found = []
     for path, text in files:
         if path in HISTORY:
@@ -41,7 +39,6 @@ def imported_modules(text):
 
 
 def not_stdlib(names):
-    """Names that no isolated interpreter without site-packages can import."""
     probe = "import importlib.util, sys; print(' '.join(n for n in sys.argv[1:] if importlib.util.find_spec(n) is None))"
     run = subprocess.run([sys.executable, "-I", "-S", "-c", probe, *sorted(names)], capture_output=True,
                          encoding="utf-8", check=True)

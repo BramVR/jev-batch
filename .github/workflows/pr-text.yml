@@ -1,6 +1,5 @@
 name: pr-text
 
-# Separate from ci.yml so an edited PR body reruns this check and not the test matrix.
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]

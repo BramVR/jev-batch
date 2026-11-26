@@ -9,7 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import check_prose  # noqa: E402
 
-# Verbatim lines from merged PRs that the reviewers' writing rules forbid.
 PR41_SLASH = "- Real CLI against a local stub: noul 0.2 / 0.4 / 0.5 with `--fail-under 0.5` exits 10 / 10 / 0."
 PR19_TITLE = "refactor!: per-command flags, UTF-8 stdio, encoding/JSONL lint, AGENTS.md rule table"
 PR16_COUNT = "- `verify.py run chunk`: 28/28 PASS"
