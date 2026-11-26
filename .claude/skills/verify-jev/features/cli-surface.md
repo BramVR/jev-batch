@@ -4,7 +4,7 @@ A user gets help, clear usage errors, and local rejection of bad flags or questi
 
 ## Sub-features
 
-- `help` top-level `--help` names all four commands; `batch --help` lists `--questions`, `--dry-run`, and `--concurrency` but not `--labels`; `summarize --help` lists `--question` but not `--retries`.
+- `help` top-level `--help` names all five commands; `ask choice --help` lists `-o` and `--expect` but not `--fail-under` or `--questions`; `batch --help` lists `--questions`, `--dry-run`, and `--concurrency` but not `--labels`; `summarize --help` lists `--question` but not `--retries`.
 - `version` `--version` prints `jev.py <__version__>` and exits 0, with the version read from the copied `jev.py`.
 - `help-retry-rule` the `--retries` help names every retry case: 429, 5xx, connection errors, timeouts, and the `Endpoint is unavailable` body on statuses other than 401/403/422. Keep it in step with README when the policy changes.
 - `usage-error` `classify`, `batch`, or `eval` without `--questions`, or `eval` without `--labels`, exits 2 from argparse.

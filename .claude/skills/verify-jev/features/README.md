@@ -6,7 +6,7 @@ The maintained source for verifying what a jev-batch user can observe. Read this
 
 - `python3 .claude/skills/verify-jev/verify.py doctor` exits 0.
 - Each journey runs on a fresh copy under `.private/verify/<run-id>/build` with env reduced to `PATH`, `HOME`, `LANG`, plus what the step sets.
-- Fixture files (`noul.json`, `choice.json`, `box.json`, `score.json`, `empty.json`, `weird.json`, `record.json`, `results.jsonl`, `mixed.json`, plus the question-file fixtures `noul.v1.json`, `choice.v1.json`, `v2.json`, `extra.v1.json`, `empty.v1.json`, `broken.json`, and eval's `labels.jsonl`, `dup-labels.jsonl`, `bad-labels.jsonl`) are written into the run's `work/` dir, which is the CLI's cwd. The same dir is `HOME` and holds one synthetic `.codex/sessions/synthetic.jsonl` for the demo journey.
+- Fixture files (`noul.json`, `choice.json`, `box.json`, `score.json`, `empty.json`, `weird.json`, `record.json`, `results.jsonl`, `mixed.json`, `ask-noul.json`, `state.txt`, plus the question-file fixtures `noul.v1.json`, `choice.v1.json`, `v2.json`, `extra.v1.json`, `empty.v1.json`, `broken.json`, and eval's `labels.jsonl`, `dup-labels.jsonl`, `bad-labels.jsonl`) are written into the run's `work/` dir, which is the CLI's cwd. The same dir is `HOME` and holds one synthetic `.codex/sessions/synthetic.jsonl` for the demo journey.
 - Offline journeys reach System One only through the loopback stub via `--base-url` or `JEV_BASE_URL`.
 
 ## Driving conventions
@@ -26,6 +26,7 @@ The maintained source for verifying what a jev-batch user can observe. Read this
 - [CLI surface](./cli-surface.md) covers help, usage errors, the Python version floor, and local validation of questions, retry, and concurrency flags.
 - [Question files](./question-files.md) covers version-1 and legacy question files, identical requests, and pre-HTTP rejection of bad files.
 - [Classify one record](./classify.md) covers stdin and `--input`, verbatim output, retried and permanent request failures, and gate exit codes.
+- [Ask one question](./ask.md) covers `ask noul|choice|score` sending what `classify` sends, `--value`, state sources, flag scope, dry run, and gates.
 - [Batch JSONL](./batch.md) covers ordering, duplicates, retries, the concurrency bound, and stop-at-first-failure with preserved prefix.
 - [Eval against hand labels](./eval.md) covers exact metrics, denominators, offline guarantee, and input errors.
 - [Summarize results](./summarize.md) covers offline label counts, example IDs, confidence bins, and their diagnostics.
