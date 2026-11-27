@@ -1,8 +1,12 @@
+import contextlib
 from datetime import date, timedelta
+import io
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -47,6 +51,19 @@ class LintTests(unittest.TestCase):
         self.assertEqual(rules('path.read_text()  # lint-allow: implicit-encoding reason="x"\n'), ["implicit-encoding"])
         expired = ok.replace(later, earlier)
         self.assertIn("lint-allow expired", lint.lint(Path("scripts/new.py"), expired)[0])
+
+    def test_untracked_files_are_linted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q", tmp], check=True)
+            Path(tmp, "tracked.py").write_text("x = 1\n", encoding="utf-8")
+            subprocess.run(["git", "-C", tmp, "add", "tracked.py"], check=True)
+            Path(tmp, "new file.py").write_text('open("x").read()\n', encoding="utf-8")
+            out = io.StringIO()
+            with mock.patch.object(lint, "ROOT", Path(tmp)), contextlib.redirect_stdout(out):
+                code = lint.main([])
+        self.assertEqual(code, 1)
+        self.assertIn("new file.py:1: implicit-encoding", out.getvalue())
+        self.assertIn("lint: 2 files", out.getvalue())
 
     def test_repo_is_clean(self):
         run = subprocess.run([sys.executable, str(ROOT / "scripts" / "lint.py")], capture_output=True, encoding="utf-8")

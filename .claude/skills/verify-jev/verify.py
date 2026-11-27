@@ -1027,7 +1027,7 @@ def cmd_doctor(args):
     head = subprocess.run(["git", "-C", str(ROOT), "status", "-sb", "--porcelain"], capture_output=True, encoding="utf-8")
     branch, *changed = head.stdout.rstrip("\n").split("\n")
     print("git: " + (branch or "?") + f", {len(changed)} changed paths")
-    compiled = subprocess.run([sys.executable, "-c", f"import ast;ast.parse(open({str(ROOT / 'jev.py')!r}).read())"],
+    compiled = subprocess.run([sys.executable, "-c", f"import ast;ast.parse(open({str(ROOT / 'jev.py')!r}, 'rb').read())"],
                               capture_output=True, encoding="utf-8")
     if compiled.returncode:
         problems.append("jev.py does not parse")
