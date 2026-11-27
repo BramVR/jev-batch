@@ -60,11 +60,11 @@ PRICES = {
 GATE_FALSE = 10
 GATE_ABSTAIN = 11
 EXIT_CODES = {
-    0: "success; with a classify gate, the gate passed",
-    1: "error: bad input or questions file, missing credentials, failed request, or an unreadable gated answer",
+    0: "success; with a classify or ask gate, the gate passed",
+    1: "error: bad input or questions file, missing credentials, failed request, or an unreadable gated or --value answer",
     2: "usage error: unknown flag, missing required flag, or a flag value out of range",
-    GATE_FALSE: "classify gate false: --fail-under, --expect, or --min-confidence failed",
-    GATE_ABSTAIN: "classify abstain: noul inside --abstain-band",
+    GATE_FALSE: "classify or ask gate false: --fail-under, --expect, or --min-confidence failed",
+    GATE_ABSTAIN: "classify or ask abstain: noul inside --abstain-band",
     130: "interrupted by Ctrl-C",
 }
 # Which question types each gate flag can gate.
@@ -383,14 +383,17 @@ class Gate:
 
 
 def build_gate(args, questions):
-    if getattr(args, "question", None) is not None and args.question not in questions:
-        raise JevError(f"--question {args.question!r} is not in the questions file")
-    flags = {name: getattr(args, name) for name in GATE_FITS if getattr(args, name, None) is not None}
+    # ask has one question and no --question flag.
+    name = getattr(args, "question", None)
+    if name is not None and name not in questions:
+        raise JevError(f"--question {name!r} is not in the questions file")
+    flags = {flag: getattr(args, flag) for flag in GATE_FITS if getattr(args, flag, None) is not None}
     if not flags:
         return None
-    if args.question is None and len(questions) > 1:
+    if name is None and len(questions) > 1:
         raise JevError("gate flags need --question when the questions file has several questions")
-    name = args.question if args.question is not None else next(iter(questions))
+    if name is None:
+        name = next(iter(questions))
     question = questions[name]
     for flag in flags:
         if question["type"] not in GATE_FITS[flag]:
@@ -402,15 +405,18 @@ def build_gate(args, questions):
     return Gate(name, **flags)
 
 
-def gate_exit(gate, answers):
-    answer = answers.get(gate.question)
+def answer_field(answers, name, field, kinds, purpose):
+    answer = answers.get(name)
+    value = answer.get(field) if isinstance(answer, dict) else None
+    if isinstance(value, bool) or not isinstance(value, kinds):
+        kind = "string" if kinds is str else "numeric"
+        raise JevError(f"cannot {purpose}; answer {name!r} has no {kind} {field}")
+    return value
 
+
+def gate_exit(gate, answers):
     def read(field, kinds):
-        value = answer.get(field) if isinstance(answer, dict) else None
-        if isinstance(value, bool) or not isinstance(value, kinds):
-            kind = "string" if kinds is str else "numeric"
-            raise JevError(f"cannot evaluate the gate; answer {gate.question!r} has no {kind} {field}")
-        return value
+        return answer_field(answers, gate.question, field, kinds, "evaluate the gate")
 
     # Read every field a set flag needs first, so a missing one exits 1 whichever flag would decide.
     noul = read("noul", (int, float)) if (gate.abstain_band, gate.fail_under) != (None, None) else None
@@ -734,15 +740,97 @@ def band(text):
     return low, high
 
 
+def option(text):
+    key, equals, description = text.partition("=")
+    if not key or not equals:
+        raise argparse.ArgumentTypeError(f"{text!r} is not KEY=DESCRIPTION with a nonempty KEY")
+    return key, description
+
+
+class Options(argparse.Action):
+    """Collects repeated -o KEY=DESCRIPTION into the choice criteria mapping; a repeated KEY is a usage error."""
+
+    def __call__(self, parser, namespace, value, option_string=None):
+        key, description = value
+        criteria = getattr(namespace, self.dest) or {}
+        if key in criteria:
+            parser.error(f"argument {option_string}: KEY {key!r} given twice")
+        setattr(namespace, self.dest, {**criteria, key: description})
+
+
+@dataclass(frozen=True)
+class AskType:
+    value: object  # JSON kinds of answers.answer.<type>, the field --value prints
+    criteria: tuple = ()  # (flag, add_argument kwargs) that fills the question's criteria; noul has none
+
+
+# One ask sub-command per question type. Which gate flags each one takes comes from GATE_FITS.
+ASK_TYPES = {
+    "noul": AskType((int, float)),
+    "choice": AskType(str, ("-o", dict(type=option, action=Options, metavar="KEY=DESCRIPTION",
+                                       help="a choice option, repeatable; splits on the first ="))),
+    "score": AskType((int, float), ("-l", dict(action="append", metavar="DESCRIPTION",
+                                               help="a score level, repeatable; levels are indexed from 0 in order"))),
+}
+
+
+def ask_state(args):
+    if args.state is not None:
+        state = args.state
+    elif args.state_file is not None:
+        # newline="" keeps CRLF: state is sent unchanged.
+        with args.state_file.open(encoding="utf-8", newline="") as source:
+            state = source.read()
+    else:
+        # Windows stdin turns CRLF into LF; POSIX stdin already passes it through.
+        if isinstance(sys.stdin, io.TextIOWrapper):
+            sys.stdin.reconfigure(newline="")
+        state = sys.stdin.read()
+    if not state:
+        raise JevError("state is empty; pass --state TEXT, --state-file PATH, or text on stdin")
+    return state
+
+
+def ask_question(args):
+    question = {"type": args.ask, "instructions": args.instructions}
+    criteria = getattr(args, "criteria", None)
+    if criteria is not None:
+        question["criteria"] = criteria
+    return question
+
+
 def exit_code_help():
     return "exit codes:\n" + "\n".join(f"  {code:<5}{meaning}" for code, meaning in EXIT_CODES.items())
+
+
+GATE_FLAGS = {
+    "fail_under": dict(type=unit_interval, metavar="P", help=f"exit {GATE_FALSE} when noul < P; P in [0, 1]"),
+    "expect": dict(metavar="KEY", help=f"exit {GATE_FALSE} when the choice is not KEY, a criteria key"),
+    "min_confidence": dict(type=unit_interval, metavar="C",
+                           help=f"exit {GATE_FALSE} when {' or '.join(GATE_FITS['min_confidence'])} confidence < C; "
+                                f"C in [0, 1]"),
+    "abstain_band": dict(type=band, metavar="LO,HI",
+                         help=f"exit {GATE_ABSTAIN} when LO <= noul <= HI, ends included; LO and HI in [0, 1], "
+                              f"LO <= HI; abstain wins over the other gate flags"),
+}
+
+
+def add_gate_flags(parser, types):
+    """Add each gate flag that gates one of `types`, as GATE_FITS says."""
+    for name, kwargs in GATE_FLAGS.items():
+        if set(GATE_FITS[name]) & set(types):
+            parser.add_argument("--" + name.replace("_", "-"), **kwargs)
 
 
 def build_parser():
     questions_help = (f"JSON questions file: raw API mapping or "
                       f"{{schema_version: {'|'.join(map(str, SCHEMA_VERSIONS))}, questions}}")
+    files = argparse.ArgumentParser(add_help=False)
+    files.add_argument("--questions", type=Path, required=True, help=questions_help)
+    files.add_argument("--chunk-tokens", type=int, metavar="N",
+                       help=f"split string state so each request stays within N estimated tokens "
+                            f"(max {QUESTION_TOKEN_LIMIT}); choice questions only")
     sending = argparse.ArgumentParser(add_help=False)
-    sending.add_argument("--questions", type=Path, required=True, help=questions_help)
     sending.add_argument("--base-url", default=os.environ.get("JEV_BASE_URL", DEFAULT_BASE_URL))
     sending.add_argument("--model", default=os.environ.get("JEV_MODEL", DEFAULT_MODEL))
     sending.add_argument("--timeout", type=float, default=60, help="per-request seconds (default 60)")
@@ -752,35 +840,35 @@ def build_parser():
                               "sends nothing and reads no credentials")
     sending.add_argument("--retries", type=int, default=DEFAULT_RETRIES,
                          help=f"retries per request after {RETRY_RULE} (default {DEFAULT_RETRIES}, max {MAX_RETRIES})")
-    sending.add_argument("--chunk-tokens", type=int, metavar="N",
-                         help=f"split string state so each request stays within N estimated tokens "
-                              f"(max {QUESTION_TOKEN_LIMIT}); choice questions only")
+    exit_codes = dict(epilog=exit_code_help(), formatter_class=argparse.RawDescriptionHelpFormatter)
 
-    gating = argparse.ArgumentParser(add_help=False)
-    gating.add_argument("--question", metavar="NAME", help="question to gate; default the only question")
-    gating.add_argument("--fail-under", type=unit_interval, metavar="P",
-                        help=f"exit {GATE_FALSE} when noul < P; P in [0, 1]")
-    gating.add_argument("--expect", metavar="KEY",
-                        help=f"exit {GATE_FALSE} when the choice is not KEY, a criteria key")
-    gating.add_argument("--min-confidence", type=unit_interval, metavar="C",
-                        help=f"exit {GATE_FALSE} when {' or '.join(GATE_FITS['min_confidence'])} confidence < C; "
-                             f"C in [0, 1]")
-    gating.add_argument("--abstain-band", type=band, metavar="LO,HI",
-                        help=f"exit {GATE_ABSTAIN} when LO <= noul <= HI, ends included; LO and HI in [0, 1], "
-                             f"LO <= HI; abstain wins over the other gate flags")
-
-    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False, epilog=exit_code_help(),
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False, **exit_codes)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    commands = parser.add_subparsers(dest="command", required=True, metavar="{classify,batch,eval,summarize}")
-    classify_ = commands.add_parser("classify", allow_abbrev=False, parents=[sending, gating],
-                                    help="classify one {id,state} record", epilog=exit_code_help(),
-                                    formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True, metavar="{classify,batch,ask,eval,summarize}")
+    classify_ = commands.add_parser("classify", allow_abbrev=False, parents=[files, sending],
+                                    help="classify one {id,state} record", **exit_codes)
+    classify_.add_argument("--question", metavar="NAME", help="question to gate; default the only question")
+    add_gate_flags(classify_, set().union(*GATE_FITS.values()))
     classify_.add_argument("--input", type=Path, help="one {id,state} JSON record; default stdin")
-    classify_.set_defaults(run=run_send)
-    batch_ = commands.add_parser("batch", allow_abbrev=False, parents=[sending], help="classify {id,state} JSONL from stdin, in order")
+    classify_.set_defaults(run=run_files)
+    batch_ = commands.add_parser("batch", allow_abbrev=False, parents=[files, sending], help="classify {id,state} JSONL from stdin, in order")
     batch_.add_argument("--concurrency", type=int, default=1, help=f"requests in flight (default 1, max {MAX_CONCURRENCY})")
-    batch_.set_defaults(run=run_send)
+    batch_.set_defaults(run=run_files)
+    ask_ = commands.add_parser("ask", allow_abbrev=False, help="ask one question about plain text; no JSON files")
+    kinds = ask_.add_subparsers(dest="ask", required=True, metavar="{" + ",".join(ASK_TYPES) + "}")
+    for kind, spec in ASK_TYPES.items():
+        sub = kinds.add_parser(kind, allow_abbrev=False, parents=[sending], help=f"ask one {kind} question", **exit_codes)
+        sub.add_argument("instructions", metavar="QUESTION", help="the question, sent as the instructions")
+        if spec.criteria:
+            flag, kwargs = spec.criteria
+            sub.add_argument(flag, dest="criteria", required=True, **kwargs)
+        state = sub.add_mutually_exclusive_group()
+        state.add_argument("--state", metavar="TEXT", help="text to ask about, sent unchanged; default raw UTF-8 stdin")
+        state.add_argument("--state-file", type=Path, metavar="PATH", help="read the text from a UTF-8 file")
+        sub.add_argument("--value", action="store_true",
+                         help=f"print only answers.answer.{kind} instead of the JSON line; --dry-run still prints its report")
+        add_gate_flags(sub, (kind,))
+        sub.set_defaults(run=run_ask)
     eval_ = commands.add_parser("eval", allow_abbrev=False, help="score saved batch results on stdin against hand labels; offline")
     eval_.add_argument("--questions", type=Path, required=True, help=questions_help)
     eval_.add_argument("--labels", type=Path, required=True, help="hand-labeled {id,label} JSONL file")
@@ -809,31 +897,54 @@ def main(argv=None):
         return 1
 
 
-def run_send(args):
+def run_files(args):
+    """classify and batch: questions from --questions; classify's record from --input or stdin."""
+    def read_record():
+        return read_json(args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read())
+    return run_send(args, lambda: load_questions(args.questions), read_record)
+
+
+def run_ask(args):
+    """ask: one question and an {"id": null, "state": TEXT} record, both built in memory."""
+    kinds = ASK_TYPES[args.ask].value
+
+    def show(result):
+        if not args.value:
+            emit(result)
+            return
+        value = answer_field(result["answers"], "answer", args.ask, kinds, "print --value")
+        print(value if isinstance(value, str) else json.dumps(value), flush=True)
+    return run_send(args, lambda: {"answer": ask_question(args)}, lambda: {"id": None, "state": ask_state(args)}, show)
+
+
+def run_send(args, read_questions, read_record, show=emit):
+    """The send path classify, batch, and ask share. batch never calls read_record; it reads JSONL from stdin."""
+    chunk_tokens = getattr(args, "chunk_tokens", None)
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         raise JevError("timeout must be positive and finite")
     if not 0 <= args.retries <= MAX_RETRIES:
         raise JevError(f"retries must be between 0 and {MAX_RETRIES}")
     if args.command == "batch" and not 1 <= args.concurrency <= MAX_CONCURRENCY:
         raise JevError(f"concurrency must be between 1 and {MAX_CONCURRENCY}")
-    questions = load_questions(args.questions)
+    questions = read_questions()
     gate = build_gate(args, questions)
-    if args.chunk_tokens is not None:
-        check_chunk_questions(questions, args.chunk_tokens)
+    if chunk_tokens is not None:
+        check_chunk_questions(questions, chunk_tokens)
     backend = Backend(args.base_url, args.model)
     if any(q["type"] == "box" for q in questions.values()) and not backend.supports_box:
         raise JevError("Box and assets require a backend and model with image support; free Jev 1.13 is unsupported")
+    # ask reads its text here: bad flags fail without waiting on stdin, and empty text fails before credentials.
+    record = read_record() if args.command == "ask" else None
     key = api_key() if backend.typesafe and not args.dry_run else None
     cache = Cache(args.cache) if args.cache else None
 
     if args.dry_run:
         def estimator(record):
-            if args.chunk_tokens is None:
+            if chunk_tokens is None:
                 return estimate(record, questions, backend)
-            return estimate_chunked(record, questions, backend, args.chunk_tokens)
-        if args.command == "classify":
-            raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
-            emit(dry_run_report([estimator(read_json(raw))], backend))
+            return estimate_chunked(record, questions, backend, chunk_tokens)
+        if args.command != "batch":
+            emit(dry_run_report([estimator(record or read_record())], backend))
             return 0
         rows = []
         for number, line in enumerate(sys.stdin, 1):
@@ -846,16 +957,15 @@ def run_send(args):
         emit(dry_run_report(rows, backend))
         return 0
     if args.command == "batch":
-        return batch(questions, key, backend, args.timeout, args.retries, args.concurrency, cache, args.chunk_tokens)
-    raw = args.input.read_text(encoding="utf-8") if args.input else sys.stdin.read()
-    record = read_json(raw)
-    if args.chunk_tokens is None:
+        return batch(questions, key, backend, args.timeout, args.retries, args.concurrency, cache, chunk_tokens)
+    record = record or read_record()
+    if chunk_tokens is None:
         result = classify(record, questions, key, backend, args.timeout, args.retries, cache=cache)
     else:
-        spans = chunk_plan(record, questions, args.chunk_tokens)
-        result = run_chunks(record, spans, questions, key, backend, args.timeout, args.chunk_tokens,
+        spans = chunk_plan(record, questions, chunk_tokens)
+        result = run_chunks(record, spans, questions, key, backend, args.timeout, chunk_tokens,
                             args.retries, threading.Event(), cache)
-    emit(result)
+    show(result)
     return gate_exit(gate, result["answers"]) if gate else 0
 
 

@@ -2,6 +2,8 @@
 
 ## 0.1.0
 
+- Add `ask noul|choice|score QUESTION` to ask one question about plain text from `--state`, `--state-file`, or stdin with no JSON files: choice options come from repeatable `-o KEY=DESCRIPTION`, score levels from repeatable `-l DESCRIPTION`; it sends exactly the request `classify` would and prints the same line, `--value` prints only the answer field, and the gate flags that fit each type set exit codes 10 and 11.
+
 - Add `classify` gate flags `--fail-under`, `--expect`, `--min-confidence`, and `--abstain-band LO,HI` (with `--question NAME`): the full response still prints, then the exit is 10 when the gate is false and 11 when Noul falls inside the inclusive abstain band, which wins over the other flags; `--help` and a new README table list every exit code.
 
 - Add `--version`, which prints `jev.py 0.1.0` from a checkout; the User-Agent takes its version from the same constant.

@@ -1,6 +1,6 @@
 ---
 name: verify-jev
-description: "Drive the jev-batch command line (jev.py classify/batch including --dry-run estimates, eval, summarize, scripts/demo_sessions.py) end to end against a fresh copy and capture evidence. Use after changing jev.py, the demo script or its redaction, flags, backend selection, cache, pricing, or output, or when asked to prove the CLI works."
+description: "Drive the jev-batch command line (jev.py classify/batch/ask including --dry-run estimates, eval, summarize, scripts/demo_sessions.py) end to end against a fresh copy and capture evidence. Use after changing jev.py, the demo script or its redaction, flags, backend selection, cache, pricing, or output, or when asked to prove the CLI works."
 ---
 
 # Verify jev-batch

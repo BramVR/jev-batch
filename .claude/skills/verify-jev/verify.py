@@ -59,6 +59,27 @@ def noul_reply(value):
     return '{"model":"stub-model","answers":{"billing":{"type":"noul","noul":%s}},"usage":{"input_tokens":4}}' % value
 
 
+ASK_QUESTION = "Is this about billing?"
+# What classify sends for questions {"answer": noul} and record {"id": null, "state": "Charged twice"}.
+ASK_BODY = {"model": "jev-1.13-free", "state": "Charged twice",
+            "questions": {"answer": {"type": "noul", "instructions": ASK_QUESTION}}}
+ASK_BYTES = len(json.dumps(ASK_BODY).encode())
+
+
+def ask_reply(answer):
+    return json.dumps({"model": "stub-model", "answers": {"answer": answer}, "usage": {"input_tokens": 4}})
+
+
+def ask_request(body, version):
+    """One request carrying exactly `body`, with classify's headers and no Authorization."""
+    def check(reqs):
+        return (len(reqs) == 1 and reqs[0]["body"] == body and reqs[0]["bytes"] == len(json.dumps(body).encode())
+                and reqs[0]["headers"].get("user-agent") == f"jev-batch/{version}"
+                and reqs[0]["headers"].get("content-type") == "application/json"
+                and "authorization" not in reqs[0]["headers"])
+    return check
+
+
 def printed(id_, reply):
     """The stdout line classify prints for a stub reply: id first, then the parsed body re-serialized."""
     return '{"id": ' + json.dumps(id_) + ", " + json.dumps(json.loads(reply))[1:] + "\n"
@@ -244,7 +265,9 @@ def journeys(stub_url, version):
     response = json.loads(STUB_RESPONSE)
     return {
         "cli-surface": [
-            Step("help", ["--help"], stdout=lambda o: all(c in o for c in ("classify", "batch", "eval", "summarize"))),
+            Step("help", ["--help"], stdout=lambda o: all(c in o for c in ("classify", "batch", "ask", "eval", "summarize"))),
+            Step("ask choice help", ["ask", "choice", "--help"], stdout=lambda o: "-o KEY=DESCRIPTION" in o
+                 and "--expect KEY" in o and "--fail-under P" not in o and "--questions" not in o),
             Step("batch help", ["batch", "--help"], stdout=lambda o: "--questions" in o and "--dry-run" in o
                  and "--concurrency" in o and "--labels" not in o),
             Step("summarize help", ["summarize", "--help"], stdout=lambda o: "--question " in o and "--retries" not in o),
@@ -368,6 +391,52 @@ def journeys(stub_url, version):
             Step("gate value outside [0, 1] is a usage error",
                  ["classify", "--questions", "noul.json", "--fail-under", "1.5", *stub_args], '{"id":1,"state":"x"}',
                  code=2, stderr="argument --fail-under: '1.5' is not a number in [0, 1]", requests=lambda r: not r),
+        ],
+        "ask": [
+            Step("printf 'Charged twice' | ask noul --value prints the stub's noul, exits 0",
+                 ["ask", "noul", ASK_QUESTION, "--value", *stub_args], "Charged twice",
+                 env={"TYPESAFE_API_KEY": SENTINEL_KEY}, stub=[ok(ask_reply({"type": "noul", "noul": 0.8125}))],
+                 stdout=lambda o: o == "0.8125\n", requests=ask_request(ASK_BODY, version)),
+            Step("classify sends the same body for the equivalent question file and record",
+                 ["classify", "--questions", "ask-noul.json", *stub_args], '{"id":null,"state":"Charged twice"}',
+                 env={"TYPESAFE_API_KEY": SENTINEL_KEY}, stub=[ok(ask_reply({"type": "noul", "noul": 0.8125}))],
+                 stdout=lambda o: lines_json(o) == [{"id": None, **json.loads(ask_reply({"type": "noul", "noul": 0.8125}))}],
+                 requests=ask_request(ASK_BODY, version)),
+            Step("ask choice -o builds criteria in order, --value prints the winner",
+                 ["ask", "choice", CHOICE["topic"]["instructions"],
+                  *(arg for key, text in CHOICE["topic"]["criteria"].items() for arg in ("-o", f"{key}={text}")),
+                  "--state", "I was charged twice", "--value", *stub_args],
+                 stub=[ok(ask_reply({"type": "choice", "choice": "billing", "confidence": 0.9}))],
+                 stdout=lambda o: o == "billing\n",
+                 requests=ask_request({"model": "jev-1.13-free", "state": "I was charged twice",
+                                       "questions": {"answer": CHOICE["topic"]}}, version)),
+            Step("ask score -l levels from --state-file, CRLF kept, prints classify's JSON line",
+                 ["ask", "score", "How urgent?", "-l", "low", "-l", "high", "--state-file", "state.txt", *stub_args],
+                 stub=[ok(ask_reply({"type": "score", "score": 1, "legend": "high", "confidence": 0.7}))],
+                 stdout=lambda o: o == printed(None, ask_reply({"type": "score", "score": 1, "legend": "high",
+                                                                "confidence": 0.7})),
+                 requests=ask_request({"model": "jev-1.13-free", "state": "Server down\r\nsince 9am\r\n",
+                                       "questions": {"answer": SCORE["urgency"]}}, version)),
+            Step("ask choice without -o is a usage error", ["ask", "choice", "Pick one.", *stub_args], "x", stub=[ok()],
+                 code=2, stderr="the following arguments are required: -o", requests=lambda r: r == []),
+            Step("-o on ask noul is a usage error", ["ask", "noul", ASK_QUESTION, "-o", "a=A", *stub_args], "x",
+                 stub=[ok()], code=2, stderr="unrecognized arguments: -o", requests=lambda r: r == []),
+            Step("--state with --state-file is a usage error",
+                 ["ask", "noul", ASK_QUESTION, "--state", "x", "--state-file", "state.txt", *stub_args], stub=[ok()],
+                 code=2, stderr="not allowed with argument --state", requests=lambda r: r == []),
+            Step("--dry-run sends nothing and prints its report whatever --value says",
+                 ["ask", "noul", ASK_QUESTION, "--dry-run", "--value", *stub_args], "Charged twice", stub=[ok()],
+                 stdout=lambda o: report(o, "unknown", None) and json.loads(o)["records"][0]["request_bytes"] == ASK_BYTES,
+                 requests=lambda r: r == []),
+            Step("empty stdin exits 1 and sends nothing", ["ask", "noul", ASK_QUESTION, *stub_args], "", stub=[ok()],
+                 code=1, stderr="jev: state is empty", stdout=lambda o: o == "", requests=lambda r: r == []),
+            Step("gate: noul 0.2 under --fail-under 0.5 prints the --value, exits 10",
+                 ["ask", "noul", ASK_QUESTION, "--fail-under", "0.5", "--value", *stub_args], "Charged twice",
+                 stub=[ok(ask_reply({"type": "noul", "noul": 0.2}))], code=10, stdout=lambda o: o == "0.2\n",
+                 requests=lambda r: len(r) == 1),
+            Step("a gate flag that does not fit the type is a usage error",
+                 ["ask", "noul", ASK_QUESTION, "--expect", "billing", *stub_args], "x", stub=[ok()], code=2,
+                 stderr="unrecognized arguments: --expect", requests=lambda r: r == []),
         ],
         "batch": [
             Step("three lines in order, duplicate ids kept", ["batch", "--questions", "choice.json", *stub_args],
@@ -839,8 +908,12 @@ def write_fixtures(work):
                         "empty.v1.json": {"schema_version": 1, "questions": {}},
                         "broken.json": '{"billing": {"type": "noul"',
                         "mixed.json": {**CHOICE, **NOUL},
+                        "ask-noul.json": {"answer": {"type": "noul", "instructions": ASK_QUESTION}},
+                        "state.txt": "Server down\r\nsince 9am\r\n",
                         "record.json": {"id": {"ticket": 7}, "state": {"subject": "App crashes on save"}}}.items():
-        (work / name).write_text(value if isinstance(value, str) else json.dumps(value), encoding="utf-8")
+        # Bytes, so state.txt keeps exactly its CRLF line ends on every platform.
+        text = value if isinstance(value, str) else json.dumps(value)
+        (work / name).write_bytes(text.encode("utf-8"))
     # Fake HOME session read by scripts/demo_sessions.py; synthetic text only, never a real session.
     sessions = work / ".codex/sessions"
     sessions.mkdir(parents=True, exist_ok=True)
@@ -993,7 +1066,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="build fresh, drive journeys, keep evidence")
-    run.add_argument("journeys", nargs="*", help="cli-surface classify batch summarize cache chunk eval backend-select demo-redaction live-opencode")
+    run.add_argument("journeys", nargs="*", help="cli-surface classify ask batch summarize cache chunk eval backend-select demo-redaction live-opencode")
     run.add_argument("--live", action="store_true", help="add live-opencode: 4 tiny synthetic records (6 requests) to OpenCode, plus a dry run")
     run.add_argument("--ref", default="worktree", help="worktree (default) or a git ref such as HEAD")
     run.add_argument("--keep-build", action="store_true")
